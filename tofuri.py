@@ -47,28 +47,71 @@ class TofuriEngine:
         if not reading_hira:
             return surface
 
-        remaining = reading_hira
-        parts: List[str] = []
-        cursor = 0
+        def is_kana_char(ch: str) -> bool:
+            return ("\u3040" <= ch <= "\u309f") or ("\u30a0" <= ch <= "\u30ff")
 
+        def to_hira(text: str) -> str:
+            return jaconv.kata2hira(text)
+
+        segments: List[tuple[str, str]] = []
+        cursor = 0
         for match in KANJI_REGEX.finditer(surface):
             start, end = match.span()
             if start > cursor:
-                parts.append(surface[cursor:start])
-
-            kanji_block = surface[start:end]
-            if len(surface) == 0:
-                ruby = remaining
-            else:
-                proportion = max(1, int(len(reading_hira) * len(kanji_block) / len(surface)))
-                ruby = remaining[:proportion] if len(remaining) >= proportion else remaining
-                remaining = remaining[proportion:] if len(remaining) >= proportion else ""
-            parts.append(f"<ruby>{kanji_block}<rt>{ruby}</rt></ruby>")
+                segments.append(("other", surface[cursor:start]))
+            segments.append(("kanji", match.group(0)))
             cursor = end
-
         if cursor < len(surface):
-            parts.append(surface[cursor:])
-        return "".join(parts)
+            segments.append(("other", surface[cursor:]))
+
+        def next_kana_anchor(from_index: int) -> str:
+            for next_idx in range(from_index + 1, len(segments)):
+                kind, segment_text = segments[next_idx]
+                if kind != "other":
+                    continue
+                kana_chars = [to_hira(ch) for ch in segment_text if is_kana_char(ch)]
+                if kana_chars:
+                    return "".join(kana_chars)
+            return ""
+
+        rendered: List[str] = []
+        read_cursor = 0
+
+        for idx, (kind, segment_text) in enumerate(segments):
+            if kind == "other":
+                rendered.append(segment_text)
+                for ch in segment_text:
+                    if not is_kana_char(ch):
+                        continue
+                    hira = to_hira(ch)
+                    if read_cursor < len(reading_hira) and reading_hira[read_cursor] == hira:
+                        read_cursor += 1
+                        continue
+                    found = reading_hira.find(hira, read_cursor)
+                    if found != -1:
+                        read_cursor = found + 1
+                continue
+
+            anchor = next_kana_anchor(idx)
+            anchor_pos = reading_hira.find(anchor, read_cursor) if anchor else -1
+
+            if anchor_pos > read_cursor:
+                ruby = reading_hira[read_cursor:anchor_pos]
+                read_cursor = anchor_pos
+            else:
+                remaining_kanji_blocks = sum(1 for k, _ in segments[idx:] if k == "kanji")
+                remaining_reading = len(reading_hira) - read_cursor
+                if remaining_kanji_blocks <= 1:
+                    ruby = reading_hira[read_cursor:]
+                    read_cursor = len(reading_hira)
+                else:
+                    take = max(1, remaining_reading - (remaining_kanji_blocks - 1))
+                    ruby = reading_hira[read_cursor : read_cursor + take]
+                    read_cursor += take
+
+            rendered.append(f"<ruby>{segment_text}<rt>{ruby}</rt></ruby>")
+
+        return "".join(rendered)
 
     def token_to_ruby(self, token: TokenInfo) -> str:
         surface = token.surface
@@ -277,14 +320,15 @@ def read_input_text(input_file: Optional[str]) -> str:
 
 
 def write_output(content: str, output_file: Optional[str]) -> None:
+    content = content.rstrip("\n")
+
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(content)
-            if not content.endswith("\n"):
-                f.write("\n")
         return
 
-    print(content)
+    sys.stdout.write(content)
+    sys.stdout.write("\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
