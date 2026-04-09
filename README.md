@@ -1,8 +1,12 @@
 Installation
 ```bash
-pip install fugashi unidic jaconv requests openai
+pip install fugashi unidic jaconv requests openai pyyaml
 python -m unidic download
 ```
+
+Specification
+- Canonical project specification (source of truth): `PROJECT_SPEC.md`
+- Detailed AI translation specification: `TRANSLATION_AI_SPEC.md`
 
 Quick Start
 ```bash
@@ -31,6 +35,14 @@ Get-Content input.txt | python tofuri.py lookup --dict-source local --dict-lang 
 Get-Content input.txt | python tofuri.py translate --language en --style cure-dolly
 Get-Content input.txt | python tofuri.py translate --language vi --style cure-dolly
 ```
+
+Translation Configuration
+- Translate mode requires `translation.yml` in project root.
+- API key is loaded from `translation.yml` (`api.api_key`) only.
+- If `translation.yml` is missing or incomplete, translate mode fails fast.
+- Audit logs are written to `memory/translation_audit_YYYYMMDD.jsonl`.
+- Each audit record includes UTC timestamp, request, response, and token usage (or null when unavailable).
+- Translation supports both OpenAI Responses API and legacy Chat Completions SDK paths.
 
 Modes
 - `segment`: token segmentation output.
@@ -96,14 +108,15 @@ Local Dictionary TSV Format
 Translate Options
 - `--language en|vi`
 - `--style standard|cure-dolly`
-- `--model <openai-model-name>`
+- `--model <openai-model-name>` optional override (default uses `translation.yml` -> `api.model_default`)
 
-OpenAI Key
-Set one of these env vars before `translate` mode:
-```powershell
-$env:OPENAI_API_KEY="your-key"
-# or
-$env:OPENAI="your-key"
+Translation Key Setup
+Set API key in `translation.yml`:
+```yaml
+api:
+	provider: openai
+	api_key: "your-key"
+	model_default: "gpt-4.1-mini"
 ```
 
 Example With File Input
