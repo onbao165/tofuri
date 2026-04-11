@@ -1,54 +1,39 @@
-| word | count | reading | pos | definition | source |
-|---|---|---|---|---|---|
-| 、 | 7 | * | 補助記号 |  | tokenizer |
-| の | 7 | の | 助詞 |  | tokenizer |
-| 音 | 7 | おと | 名詞 | âm thanh; tiếng động; âm thanh; tiếng; tiếng động; âm thanh | local |
-| に | 6 | に | 助詞 |  | tokenizer |
-| 。 | 5 | * | 補助記号 |  | tokenizer |
-| を | 5 | を | 助詞 |  | tokenizer |
-| て | 4 | て | 助詞 |  | tokenizer |
-| が | 3 | が | 助詞 |  | tokenizer |
-| いる | 2 | いる | 動詞 | có; bắn trúng; cần; ram; rang | local |
-| する | 2 | する | 動詞 | cọ xát; chà xát; xát; làm | local |
-| で | 2 | で | 助詞 |  | tokenizer |
-| 店内 | 2 | てんない | 名詞 | trong kho | local |
-| 「 | 1 | * | 補助記号 |  | tokenizer |
-| 」 | 1 | * | 補助記号 |  | tokenizer |
-| かご | 1 | かご | 名詞 | giỏ; cái giỏ; cái lồng; rổ; rọ; sự phát âm không chuẩn; phát âm không chuẩn; phát âm nhầm | local |
-| くる | 1 | くる | 動詞 | đến; Lưng gù; bệnh còi xương | local |
-| ずっと | 1 | ずっと | 副詞 | rất; rõ ràng; hơn nhiều; suốt; mãi | local |
-| なっ | 1 | なっ | 動詞 |  | tokenizer |
-| は | 1 | は | 助詞 |  | tokenizer |
-| れる | 1 | れる | 助動詞 |  | tokenizer |
-| アイドル | 1 | あいどる | 名詞 | thần tượng; nghệ sĩ trẻ | local |
-| コンビニ | 1 | こんびに | 名詞 | cửa hàng tiện lợi | local |
-| コンビニエンス | 1 | こんびにえんす | 名詞 | sự tiện lợi; tiện lợi | local |
-| コード | 1 | こーど | 名詞 | mã số; mã cốt | local |
-| スキャン | 1 | すきゃん | 名詞 | sự quét ảnh; chụp phim bằng tia phóng xạ | local |
-| ストア | 1 | すとあ | 名詞 | cửa hàng; quầy hàng | local |
-| チャイム | 1 | ちゃいむ | 名詞 | còi tầm; tiếng còi tầm; chuông cửa | local |
-| バー | 1 | ばー | 名詞 | quán ba; quầy ba; quầy bán rượu; thanh; thỏi | local |
-| パン | 1 | ぱん | 名詞 | bánh mì; bánh mỳ; chảo; cái chảo | local |
-| ヒール | 1 | ひーる | 名詞 | gót chân; gót giày; sự hàn gắn; sự hòa giải | local |
-| 入っ | 1 | はいっ | 動詞 |  | tokenizer |
-| 入れる | 1 | いれる | 動詞 | cho vào; bỏ vào; đút; kéo vào; trồng | local |
-| 全て | 1 | すべて | 名詞 | tất cả; toàn bộ; tất cả; hoàn toàn | local |
-| 商品 | 1 | しょうひん | 名詞 | hàng; phần thưởng; sản phẩm; hàng hóa; sản phẩm; thương phẩm | local |
-| 声 | 1 | こえ | 名詞 | tiếng; giọng nói | local |
-| 客 | 1 | きゃく | 名詞 | người khách; khách | local |
-| 宣伝 | 1 | せんでん | 名詞 | sự tuyên truyền; thông tin tuyên truyền; sự công khai | local |
-| 店員 | 1 | てんいん | 名詞 | người bán hàng; nhân viên bán hàng | local |
-| 掛け声 | 1 | かけごえ | 名詞 |  | tokenizer |
-| 握ら | 1 | にぎら | 動詞 |  | tokenizer |
-| 放送 | 1 | ほうそう | 名詞 | sự phát thanh; sự loan truyền | local |
-| 新 | 1 | しん | 接頭辞 |  | tokenizer |
-| 有線 | 1 | ゆうせん | 名詞 |  | tokenizer |
-| 歩き回る | 1 | あるきまわる | 動詞 | diễu; diễu hành | local |
-| 流れる | 1 | ながれる | 動詞 | chảy; chảy trôi; trôi đi; trôi tuột; trôi; trôi chảy; xuôi | local |
-| 混ざり合い | 1 | まざりあい | 動詞 |  | tokenizer |
-| 満ち | 1 | みち | 動詞 |  | tokenizer |
-| 物 | 1 | もの | 名詞 | đồ vật; vật | local |
-| 私 | 1 | わたくし | 代名詞 | tôi | local |
-| 袋 | 1 | ふくろ | 名詞 | bì; bao; túi; phong bao; đãy; gói; túi; bao | local |
-| 触れ | 1 | ふれ | 動詞 |  | tokenizer |
-| 鼓膜 | 1 | こまく | 名詞 | màng nhĩ; màng tai | local |
+{
+  "schema_version": "1.0",
+  "status": "ok",
+  "language": "en",
+  "input": "コンビニエンスストアは、音で満ちている。客が入ってくるチャイムの音に、店内を流れる有線放送で新商品を宣伝するアイドルの声。店員の掛け声に、バーコードをスキャンする音。かごに物を入れる音、パンの袋が握られる音に、店内を歩き回るヒールの音。全てが混ざり合い、「コンビニの音」になって、私の鼓膜にずっと触れている。",
+  "mode": "translation_only",
+  "translations": [
+    {
+      "index": 1,
+      "source": "コンビニエンスストアは、音で満ちている。",
+      "natural": "Convenience stores are filled with noise.",
+      "provider": "deepl"
+    },
+    {
+      "index": 2,
+      "source": "客が入ってくるチャイムの音に、店内を流れる有線放送で新商品を宣伝するアイドルの声。",
+      "natural": "The sound of the doorbell ringing as customers enter, accompanied by the voice of an idol promoting new products over the store’s public address system.",
+      "provider": "deepl"
+    },
+    {
+      "index": 3,
+      "source": "店員の掛け声に、バーコードをスキャンする音。",
+      "natural": "The sound of the barcode being scanned, accompanied by the clerk’s call.",
+      "provider": "deepl"
+    },
+    {
+      "index": 4,
+      "source": "かごに物を入れる音、パンの袋が握られる音に、店内を歩き回るヒールの音。",
+      "natural": "The sound of items being placed in a basket, the rustling of a bread bag being squeezed, and the click-clack of heels echoing through the store.",
+      "provider": "deepl"
+    },
+    {
+      "index": 5,
+      "source": "全てが混ざり合い、「コンビニの音」になって、私の鼓膜にずっと触れている。",
+      "natural": "Everything blends together to form the \"sound of a convenience store,\" constantly touching my eardrums.",
+      "provider": "deepl"
+    }
+  ]
+}

@@ -7,6 +7,7 @@ python -m unidic download
 Specification
 - Canonical project specification (source of truth): `PROJECT_SPEC.md`
 - Detailed AI translation specification: `TRANSLATION_AI_SPEC.md`
+- DeepL translation extension specification: `DEEPL_TRANSLATION_SPEC.md`
 
 Quick Start
 ```bash
@@ -34,6 +35,15 @@ Get-Content input.txt | python tofuri.py lookup --dict-source local --dict-lang 
 # Translation to English or Vietnamese
 Get-Content input.txt | python tofuri.py translate --language en --style cure-dolly
 Get-Content input.txt | python tofuri.py translate --language vi --style cure-dolly
+
+# DeepL simple source/translation output (line-by-line)
+Get-Content input.txt | python tofuri.py translate --provider deepl --language en --translate-output simple
+
+# DeepL tooltip span output (preserves input line breaks)
+Get-Content input.txt | python tofuri.py translate --provider deepl --language en --translate-output span
+
+# Copy output directly to clipboard
+Get-Content input.txt | python tofuri.py translate --provider deepl --language en --translate-output simple --clipboard
 ```
 
 Translation Configuration
@@ -54,6 +64,7 @@ Modes
 Common Options
 - `--input, -i`: read from file path instead of stdin.
 - `--output, -o`: write output to file path.
+- `--clipboard`: copy output to clipboard instead of file/stdout.
 - `--json`: use JSON output when available.
 - `--no-dedupe-ruby`: disable ruby deduplication protection.
 - `--interactive`: force numbered interactive mode.
@@ -108,15 +119,27 @@ Local Dictionary TSV Format
 Translate Options
 - `--language en|vi`
 - `--style standard|cure-dolly`
-- `--model <openai-model-name>` optional override (default uses `translation.yml` -> `api.model_default`)
+- `--provider openai|deepl` optional override (default uses `translation.yml` -> `provider.active`)
+- `--model <openai-model-name>` optional override for OpenAI only (default uses `translation.yml` -> `providers.openai.model_default`)
+- `--translate-output json|simple|span` translation output format.
+	- `simple`: DeepL-only source/translation pairs line-by-line
+	- `span`: DeepL-only tooltip span output as `<span class="trans-hover" data-meaning="...">...</span>` while preserving input line breaks
 
 Translation Key Setup
-Set API key in `translation.yml`:
+Set provider config in `translation.yml`:
 ```yaml
-api:
-	provider: openai
-	api_key: "your-key"
-	model_default: "gpt-4.1-mini"
+provider:
+	active: openai
+
+providers:
+	openai:
+		api_key: "your-openai-key"
+		model_default: "gpt-4.1-mini"
+
+	deepl:
+		auth_key: "your-deepl-key"
+		api_url: "https://api-free.deepl.com/v2/translate"
+		formality: "default"
 ```
 
 Example With File Input

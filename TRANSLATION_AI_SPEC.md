@@ -20,16 +20,15 @@ It is the detailed source of truth for translation-mode AI configuration, reques
 ## 3. translation.yml Contract
 ## 3.1 Required top-level structure
 The YAML must include:
-- api
+- provider
+- providers
 - prompt
 - response
 - guardrails
 - audit
 
 ## 3.2 Required fields
-- api.provider: openai
-- api.api_key: non-empty string
-- api.model_default: non-empty string
+- provider.active: openai | deepl
 - prompt.system: non-empty string
 - response.schema_version: string
 - response.require_json_object: true
@@ -44,12 +43,30 @@ The YAML must include:
 - audit.redact_api_key: true
 - audit.token_usage_on_missing: null
 
+Provider-conditional required fields:
+- when provider.active=openai:
+  - providers.openai.api_key: non-empty string
+  - providers.openai.model_default: non-empty string
+- when provider.active=deepl:
+  - providers.deepl.auth_key: non-empty string
+  - providers.deepl.api_url: non-empty string
+  - providers.deepl.formality: default | more | less | prefer_more | prefer_less
+
 ## 3.3 Example translation.yml
 ```yaml
 api:
-  provider: openai
-  api_key: "<OPENAI_API_KEY>"
-  model_default: "gpt-4.1-mini"
+provider:
+  active: openai
+
+providers:
+  openai:
+    api_key: "<OPENAI_API_KEY>"
+    model_default: "gpt-4.1-mini"
+
+  deepl:
+    auth_key: "<DEEPL_AUTH_KEY>"
+    api_url: "https://api-free.deepl.com/v2/translate"
+    formality: "default"
 
 prompt:
   system: |
@@ -103,7 +120,7 @@ audit:
 - Output must be a single JSON object.
 - No markdown wrappers, prose prefixes, or suffix text.
 
-## 5.2 Required successful response schema
+## 5.2 OpenAI successful response schema (dissection)
 ```json
 {
   "schema_version": "1.0",
@@ -133,7 +150,26 @@ audit:
 }
 ```
 
-## 5.3 Required rejection response schema
+## 5.3 DeepL successful response schema (translation-only)
+```json
+{
+  "schema_version": "1.0",
+  "status": "ok",
+  "language": "en",
+  "input": "<raw input text>",
+  "mode": "translation_only",
+  "translations": [
+    {
+      "index": 1,
+      "source": "猫が魚を食べる。",
+      "natural": "The cat eats fish.",
+      "provider": "deepl"
+    }
+  ]
+}
+```
+
+## 5.4 Required rejection response schema
 ```json
 {
   "schema_version": "1.0",
@@ -144,26 +180,37 @@ audit:
 }
 ```
 
-## 5.4 Schema rules
+## 5.5 Schema rules
 - grammar_notes must be a list of objects.
 - Each grammar_notes item must include:
   - topic (string)
   - explanation (string)
-- required sections for success:
+- required sections for OpenAI dissection success:
   - segmented
   - literal
   - natural
   - grammar_notes
+- DeepL success is translation-only and does not require segmented/literal/grammar_notes.
 
 ## 6. API Key Policy
-- API key source for translate mode: translation.yml api.api_key only.
+- API key source for translate mode: translation.yml provider-selected block only.
 - API key must not be read from OPENAI_API_KEY or OPENAI env vars.
 - API key value must be redacted in all logs and error outputs.
+
+DeepL auth policy:
+- Use Authorization header for DeepL requests.
+- DeepL auth key must be redacted in all logs and audit records.
 
 ## 6.1 OpenAI SDK compatibility
 - Preferred client path: OpenAI Responses API (`client.responses.create`).
 - Compatibility fallback: Chat Completions API (`client.chat.completions.create`) with JSON-object response format.
 - Implementations must support both paths to avoid runtime failures across installed SDK versions.
+
+## 6.2 DeepL constraints
+- v1 target language support in DeepL mode: EN only.
+- If language is VI and provider.active=deepl, hard fail with suggestion to switch provider to openai.
+- `--style` is ignored in deepl mode.
+- `--model` must fail fast in deepl mode because it is OpenAI-specific.
 
 ## 7. Audit Logging Policy
 ## 7.1 Location and file naming

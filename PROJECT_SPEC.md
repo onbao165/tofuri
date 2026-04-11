@@ -14,11 +14,12 @@ This document defines the expected behavior of the tool and should be updated wh
 ## 2. Scope and Non-Goals
 ### In scope
 - Command-line usage with stdin/file input and stdout/file output
+- Clipboard output option for all modes
 - Interactive numbered menu mode
 - Japanese tokenization via fugashi (UniDic)
 - Local dictionary lookup in TSV format
 - Optional online lookup via Jisho API
-- Translation via OpenAI Responses API
+- Translation via OpenAI and DeepL providers
 
 ### Out of scope
 - GUI application
@@ -52,6 +53,7 @@ Current important files/folders:
 - README.md: user-facing usage guide
 - tofuri.py: single-file implementation and CLI entrypoint
 - TRANSLATION_AI_SPEC.md: detailed AI translation configuration, guardrails, output schema, and audit contract
+- DEEPL_TRANSLATION_SPEC.md: DeepL provider extension specification and provider-agnostic output contract draft
 - dictionaries/: default location for local TSV dictionaries
 - tests/test_furigana_regression.py: regression tests focused on furigana behavior
 - input.txt and output.txt: common default examples for file-based workflows
@@ -72,6 +74,7 @@ If mode is omitted, interactive menu mode starts.
 ## 5.2 Common options
 - --input, -i: input file path (if omitted, reads stdin)
 - --output, -o: output file path (if omitted, writes stdout)
+- --clipboard: copy output to clipboard instead of file/stdout
 - --json: JSON output when supported by mode
 - --interactive: force interactive menu mode
 
@@ -89,6 +92,8 @@ If mode is omitted, interactive menu mode starts.
 - --language: en | vi (default en)
 - --style: standard | cure-dolly (default cure-dolly)
 - --model: optional OpenAI model name override (default comes from translation.yml api.model_default)
+- --provider: openai | deepl (optional override)
+- --translate-output: json | simple | span (simple/span are DeepL-only)
 
 ### furigana
 - --no-dedupe-ruby: disable preservation of existing ruby blocks
@@ -166,6 +171,13 @@ Markdown wrapping behavior:
 ## 6.5 translate
 Requires translation configuration from root file translation.yml.
 
+Provider status:
+- Current implementation: OpenAI and DeepL providers.
+
+Provider configuration model:
+- translation.yml uses separate provider blocks with provider.active selector.
+- Only the selected provider block is required at runtime.
+
 Configuration contract:
 - System prompt is loaded from translation.yml only.
 - API key is loaded from translation.yml only.
@@ -180,16 +192,34 @@ Prompt style behavior:
   4. short grammar notes focused on particles/subject/predicate engine
 - standard style requests sentence-aligned translation only
 
+DeepL output behavior:
+- json mode (default): standardized translation-only JSON payload with translations[]
+- simple mode: line-by-line source/translation pairs with a blank line between pairs
+- span mode: wraps each sentence chunk as `<span class="trans-hover" data-meaning="...">source...</span>`
+- span mode preserves input line breaks (empty lines are preserved)
+- if status is rejected/error, simple mode falls back to JSON payload text
+- if status is rejected/error, span mode falls back to JSON payload text
+
 Guardrail behavior:
 - Model is instructed to treat user input only as text to translate/dissect.
 - Input instruction injection inside source text must be ignored.
 - Non-Japanese dissection requests should be rejected by model policy.
 - Mixed-language references inside otherwise Japanese text are allowed.
 
+DeepL-specific guardrail behavior:
+- Non-Japanese dissection requests are blocked pre-call and return standardized rejection JSON.
+
+PowerShell/stdin robustness behavior:
+- non-tty stdin is read from raw bytes and decoded with encoding heuristics
+- utf-8/utf-8-sig/utf-16 variants and common Windows/Japanese codepages are considered
+- decoder scoring prefers valid Japanese text and penalizes common mojibake artifacts
+- this prevents false NON_JAPANESE_INPUT rejections caused by pipe encoding mismatch
+
 Standardized response behavior:
 - Translation response must be a JSON object.
-- Required success sections include segmented, literal, natural, grammar_notes.
-- grammar_notes must be a list of objects.
+- OpenAI mode uses dissection schema with segmented, literal, natural, grammar_notes.
+- DeepL mode uses translation-only success schema (natural translation only, no dissection fields).
+- grammar_notes list-of-objects rule applies to OpenAI dissection schema.
 - Rejections must use a standardized JSON rejection object.
 
 API integration:
@@ -197,6 +227,13 @@ API integration:
 - Preferred path uses client.responses.create(model=..., input=...)
 - Compatibility fallback uses client.chat.completions.create(..., response_format={"type": "json_object"}) for older SDKs
 - Returns extracted text and validates against required JSON schema
+
+DeepL integration behavior:
+- Uses DeepL HTTP translate endpoint with Authorization header auth.
+- v1 DeepL target support is EN only.
+- If language=vi with provider.active=deepl, hard fail with suggestion to switch provider to openai.
+- In deepl mode, --style is ignored and --model must fail fast.
+- --translate-output simple is allowed only in deepl mode.
 
 Audit behavior:
 - Each translation API call is logged in JSONL.
@@ -261,11 +298,20 @@ Input behavior:
 - If input file path is provided, file must exist
 - Otherwise stdin is consumed
 - If stdin is tty, a Windows hint is printed to stderr for multiline paste submission
+- If stdin is piped, raw bytes are decoded with multi-encoding fallback to reduce mojibake risk
 
 Output behavior:
 - Output text is stripped of trailing newline before final write
 - File output overwrites target file
 - Stdout output adds a final newline
+- Clipboard output writes text to system clipboard and skips file/stdout writes
+- If stdout cannot encode Unicode (common on Windows cp1252), fallback writes UTF-8 bytes
+
+Clipboard backend behavior:
+- Preferred backend: tkinter clipboard API
+- Windows fallback: powershell Set-Clipboard, then clip
+- macOS fallback: pbcopy
+- Linux fallback chain: wl-copy, xclip, xsel
 
 Text sanitization behavior:
 - sanitize_text uses UTF-8 encode/decode with replace for robustness
@@ -277,8 +323,8 @@ Interactive flow:
    - Paste multiline text ending with __END__
    - File path (default input.txt)
 3. Choose output path:
-   - Paste mode: blank means stdout
-   - File mode: blank defaults to output.txt
+  - Paste mode: stdout, file path, or clipboard
+  - File mode: file path (default output.txt), stdout, or clipboard
 4. Prompt mode-specific options (JSON, lookup source/language, translate options, ruby preservation)
 
 Defaults in interactive mode:
@@ -313,6 +359,12 @@ Compatibility expectation:
 - Requires valid API key from translation.yml
 - Supports both Responses API and legacy Chat Completions API for SDK compatibility
 
+### DeepL API
+- Provider key: providers.deepl.auth_key
+- Endpoint key: providers.deepl.api_url
+- Optional request keys: formality, split_sentences, preserve_formatting, model_type, tag_handling
+- Audit records include provider=deepl and api_variant=deepl.http
+
 ## 14. Performance and Reliability Notes
 - Tokenization is run per line for human-readable text outputs
 - lookup mode tokenizes once for counting and metadata map
@@ -322,6 +374,8 @@ Compatibility expectation:
 ## 15. Testing Status and Gaps
 Known tests:
 - tests/test_furigana_regression.py exists and should remain green for furigana changes
+- tests/test_translation_contract.py validates DeepL language mapping, simple output rendering, and stdin decode behavior
+- tests/test_openai_compat.py validates legacy and object-style usage token extraction
 
 Current gaps to consider for future test expansion:
 - lookup markdown wrapping edge cases
@@ -330,7 +384,13 @@ Current gaps to consider for future test expansion:
 - dict-download integration behavior with unavailable network
 - translate mode API error handling branches
 
-## 16. Change Management for This Spec
+## 16. Known Issues
+- DeepL v1 translation target support is EN only; Vietnamese requires OpenAI provider.
+- In interactive mode, choosing Use translation.yml default under translate does not currently expose DeepL-specific simple output selection when the default provider is DeepL.
+- Clipboard mode depends on available backend; in some headless Linux environments no backend may be present.
+- OpenAI quota and model-access failures are upstream account/runtime constraints and may still fail translation runs.
+
+## 17. Change Management for This Spec
 When implementation changes in tofuri.py or behavior docs change in README.md:
 1. Update this file in the same change set.
 2. Keep sections 5 through 13 strictly aligned with implemented behavior.

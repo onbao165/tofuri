@@ -1,11 +1,15 @@
 import argparse
 from datetime import datetime, timezone
 import gzip
+import html
 import io
 import json
+import locale
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -672,12 +676,9 @@ def get_required(config: Dict, dotted_key: str):
     return current
 
 
-def validate_translation_config(config: Dict) -> Dict:
-    provider = get_required(config, "api.provider")
-    api_key = get_required(config, "api.api_key")
-    model_default = get_required(config, "api.model_default")
+def validate_translation_config(config: Dict, provider_override: Optional[str] = None) -> Dict:
+    # Shared fields required for all providers.
     system_prompt = get_required(config, "prompt.system")
-
     schema_version = get_required(config, "response.schema_version")
     require_json_object = get_required(config, "response.require_json_object")
     required_sections = get_required(config, "response.required_sections")
@@ -694,27 +695,14 @@ def validate_translation_config(config: Dict) -> Dict:
     audit_redact_api_key = get_required(config, "audit.redact_api_key")
     audit_token_usage_on_missing = get_required(config, "audit.token_usage_on_missing")
 
-    if provider != "openai":
-        raise RuntimeError("translation.yml field api.provider must be 'openai'")
-    if not isinstance(api_key, str) or not api_key.strip():
-        raise RuntimeError("translation.yml field api.api_key must be a non-empty string")
-    if not isinstance(model_default, str) or not model_default.strip():
-        raise RuntimeError("translation.yml field api.model_default must be a non-empty string")
     if not isinstance(system_prompt, str) or not system_prompt.strip():
         raise RuntimeError("translation.yml field prompt.system must be a non-empty string")
-
     if not isinstance(schema_version, str) or not schema_version.strip():
         raise RuntimeError("translation.yml field response.schema_version must be a non-empty string")
     if require_json_object is not True:
         raise RuntimeError("translation.yml field response.require_json_object must be true")
     if not isinstance(required_sections, list) or any(not isinstance(s, str) for s in required_sections):
         raise RuntimeError("translation.yml field response.required_sections must be a list of strings")
-    for required_section in REQUIRED_TRANSLATION_SECTIONS:
-        if required_section not in required_sections:
-            raise RuntimeError(
-                "translation.yml field response.required_sections is missing required value: "
-                f"{required_section}"
-            )
 
     if reject_non_japanese_dissection is not True:
         raise RuntimeError("translation.yml field guardrails.reject_non_japanese_dissection must be true")
@@ -738,7 +726,104 @@ def validate_translation_config(config: Dict) -> Dict:
     if audit_token_usage_on_missing is not None:
         raise RuntimeError("translation.yml field audit.token_usage_on_missing must be null")
 
-    return config
+    # Backward-compatible provider detection.
+    provider_active = None
+    if provider_override:
+        provider_active = provider_override
+    elif isinstance(config.get("provider"), dict):
+        provider_active = config["provider"].get("active")
+    elif isinstance(config.get("api"), dict):
+        provider_active = config["api"].get("provider")
+
+    if provider_active not in ("openai", "deepl"):
+        raise RuntimeError("translation.yml provider must be openai or deepl")
+
+    providers = config.get("providers") if isinstance(config.get("providers"), dict) else {}
+
+    openai_block = providers.get("openai") if isinstance(providers.get("openai"), dict) else None
+    deepl_block = providers.get("deepl") if isinstance(providers.get("deepl"), dict) else None
+
+    # Legacy format fallback for openai.
+    if openai_block is None and isinstance(config.get("api"), dict):
+        openai_block = {
+            "api_key": config["api"].get("api_key"),
+            "model_default": config["api"].get("model_default"),
+        }
+
+    if provider_active == "openai":
+        if not isinstance(openai_block, dict):
+            raise RuntimeError("translation.yml missing providers.openai block for active openai provider")
+        api_key = openai_block.get("api_key")
+        model_default = openai_block.get("model_default")
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise RuntimeError("translation.yml field providers.openai.api_key must be a non-empty string")
+        if not isinstance(model_default, str) or not model_default.strip():
+            raise RuntimeError("translation.yml field providers.openai.model_default must be a non-empty string")
+
+        for required_section in REQUIRED_TRANSLATION_SECTIONS:
+            if required_section not in required_sections:
+                raise RuntimeError(
+                    "translation.yml field response.required_sections is missing required value: "
+                    f"{required_section}"
+                )
+
+    if provider_active == "deepl":
+        if not isinstance(deepl_block, dict):
+            # Minimal legacy fallback for deepl if user still uses api.* style.
+            if isinstance(config.get("api"), dict):
+                deepl_block = {
+                    "auth_key": config["api"].get("deepl_auth_key"),
+                    "api_url": config["api"].get("deepl_api_url"),
+                    "formality": config["api"].get("deepl_formality", "default"),
+                    "split_sentences": config["api"].get("deepl_split_sentences"),
+                    "preserve_formatting": config["api"].get("deepl_preserve_formatting"),
+                    "model_type": config["api"].get("deepl_model_type"),
+                    "tag_handling": config["api"].get("deepl_tag_handling"),
+                }
+            else:
+                raise RuntimeError("translation.yml missing providers.deepl block for active deepl provider")
+
+        auth_key = deepl_block.get("auth_key")
+        api_url = deepl_block.get("api_url")
+        formality = deepl_block.get("formality", "default")
+        valid_formality = {"default", "more", "less", "prefer_more", "prefer_less"}
+        if not isinstance(auth_key, str) or not auth_key.strip():
+            raise RuntimeError("translation.yml field providers.deepl.auth_key must be a non-empty string")
+        if not isinstance(api_url, str) or not api_url.strip():
+            raise RuntimeError("translation.yml field providers.deepl.api_url must be a non-empty string")
+        if formality not in valid_formality:
+            raise RuntimeError(
+                "translation.yml field providers.deepl.formality must be one of: "
+                "default, more, less, prefer_more, prefer_less"
+            )
+
+    return {
+        "provider_active": provider_active,
+        "prompt": {"system": system_prompt},
+        "response": {
+            "schema_version": schema_version,
+            "require_json_object": require_json_object,
+            "required_sections": required_sections,
+        },
+        "guardrails": {
+            "reject_non_japanese_dissection": reject_non_japanese_dissection,
+            "allow_mixed_reference_text": allow_mixed_reference_text,
+        },
+        "audit": {
+            "enabled": audit_enabled,
+            "directory": audit_directory,
+            "file_pattern": audit_file_pattern,
+            "timestamp_format": audit_timestamp_format,
+            "capture_raw_request": audit_capture_raw_request,
+            "capture_raw_response": audit_capture_raw_response,
+            "redact_api_key": audit_redact_api_key,
+            "token_usage_on_missing": audit_token_usage_on_missing,
+        },
+        "providers": {
+            "openai": openai_block,
+            "deepl": deepl_block,
+        },
+    }
 
 
 def now_iso8601_utc() -> str:
@@ -813,6 +898,29 @@ def call_openai_translate(client, model_name: str, system_prompt: str, user_payl
         "Installed openai SDK does not support responses.create or chat.completions.create. "
         "Please upgrade openai package."
     )
+
+
+def to_user_friendly_openai_error(exc: Exception) -> RuntimeError:
+    message = str(exc)
+    lower = message.lower()
+
+    if "insufficient_quota" in lower or ("error code: 429" in lower and "quota" in lower):
+        return RuntimeError(
+            "OpenAI API quota is exhausted for this key/account. "
+            "This is a billing/quota limit issue, not a prompt or parser issue. "
+            "Please add credits or use a key/account with available quota, then retry."
+        )
+
+    if "model_not_found" in lower or "does not exist" in lower:
+        return RuntimeError(
+            "Configured model is unavailable for this API key/account. "
+            "Try a lower-cost model in translation.yml, for example gpt-4o-mini, or use an account with access."
+        )
+
+    if "invalid_api_key" in lower or "incorrect api key" in lower:
+        return RuntimeError("OpenAI API key is invalid. Check api.api_key in translation.yml.")
+
+    return RuntimeError(message)
 
 
 def validate_translation_json_payload(payload: Dict, expected_schema_version: str, required_sections: List[str]) -> None:
@@ -935,15 +1043,283 @@ def build_translation_request_payload(text: str, target_lang: str, style: str, s
     return json.dumps(payload, ensure_ascii=False)
 
 
-def render_translate(text: str, target_lang: str, style: str, model: Optional[str]) -> str:
-    config_raw = load_yaml(TRANSLATION_CONFIG_PATH)
-    config = validate_translation_config(config_raw)
+def looks_like_primary_japanese(text: str) -> bool:
+    jp_chars = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff々ー]", text))
+    latin_chars = len(re.findall(r"[A-Za-z]", text))
+    return jp_chars > 0 and jp_chars >= max(1, latin_chars // 2)
 
-    api_key = config["api"]["api_key"]
-    model_name = model or config["api"]["model_default"]
+
+def build_rejection_payload(schema_version: str, input_text: str, reason_code: str, message: str) -> Dict:
+    return {
+        "schema_version": schema_version,
+        "status": "rejected",
+        "reason_code": reason_code,
+        "message": message,
+        "input": input_text,
+    }
+
+
+def split_sentences_for_translation(text: str) -> List[str]:
+    parts = re.split(r"(?<=[。！？!?])\s*", text)
+    sentences = [p.strip() for p in parts if p.strip()]
+    return sentences or [text.strip()]
+
+
+def split_text_by_lines_and_sentences(text: str) -> tuple[List[List[str]], List[str]]:
+    lines = text.split("\n")
+    grouped: List[List[str]] = []
+    flat: List[str] = []
+    for line in lines:
+        if not line:
+            grouped.append([])
+            continue
+
+        chunks = re.findall(r".*?(?:[。！？!?]+(?:\s+)?|$)", line)
+        chunks = [chunk for chunk in chunks if chunk]
+        grouped.append(chunks)
+        flat.extend(chunks)
+
+    return grouped, flat
+
+
+def map_deepl_target_language(target_lang: str) -> str:
+    mapping = {
+        "en": "EN",
+    }
+    mapped = mapping.get(target_lang.lower())
+    if not mapped:
+        raise RuntimeError(
+            "DeepL provider does not support this target language in v1. "
+            "Use --language en, or switch provider to openai for Vietnamese."
+        )
+    return mapped
+
+
+def render_translate_deepl(
+    text: str,
+    target_lang: str,
+    style: str,
+    model: Optional[str],
+    config: Dict,
+    schema_version: str,
+) -> tuple[str, Dict, str, Dict[str, Optional[int]], str]:
+    if model:
+        raise RuntimeError("--model is OpenAI-specific and cannot be used with deepl provider.")
+
+    if not requests:
+        raise RuntimeError("requests package is required for deepl provider. Run: pip install requests")
+
+    if not looks_like_primary_japanese(text):
+        payload = build_rejection_payload(
+            schema_version=schema_version,
+            input_text=text,
+            reason_code="NON_JAPANESE_INPUT",
+            message="Input is not valid Japanese text for dissection.",
+        )
+        return json.dumps(payload, ensure_ascii=False, indent=2), {
+            "provider": "deepl",
+            "api_variant": "deepl.http",
+            "request": {"blocked_precheck": True},
+            "response": payload,
+        }, "rejected", {"input_tokens": None, "output_tokens": None, "total_tokens": None}, config["providers"]["deepl"]["auth_key"]
+
+    target_lang_deepl = map_deepl_target_language(target_lang)
+    deepl_cfg = config["providers"]["deepl"]
+    auth_key = deepl_cfg["auth_key"]
+    api_url = deepl_cfg["api_url"]
+
+    sentences = split_sentences_for_translation(text)
+    request_body = {
+        "text": sentences,
+        "target_lang": target_lang_deepl,
+        "formality": deepl_cfg.get("formality", "default"),
+    }
+    if deepl_cfg.get("split_sentences") is not None:
+        request_body["split_sentences"] = deepl_cfg.get("split_sentences")
+    if deepl_cfg.get("preserve_formatting") is not None:
+        request_body["preserve_formatting"] = deepl_cfg.get("preserve_formatting")
+    if deepl_cfg.get("model_type") is not None:
+        request_body["model_type"] = deepl_cfg.get("model_type")
+    if deepl_cfg.get("tag_handling") is not None:
+        request_body["tag_handling"] = deepl_cfg.get("tag_handling")
+
+    headers = {
+        "Authorization": f"DeepL-Auth-Key {auth_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(api_url, headers=headers, json=request_body, timeout=30)
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"DeepL API error ({response.status_code}). "
+            "Check auth/billing or switch provider to openai for unsupported targets. "
+            f"Body: {response.text}"
+        )
+
+    data = response.json()
+    items = data.get("translations", [])
+    if not isinstance(items, list):
+        raise RuntimeError("DeepL response missing translations array.")
+
+    translations = []
+    for idx, source_sentence in enumerate(sentences, start=1):
+        translated = items[idx - 1].get("text") if idx - 1 < len(items) and isinstance(items[idx - 1], dict) else None
+        translations.append(
+            {
+                "index": idx,
+                "source": source_sentence,
+                "natural": translated or "",
+                "provider": "deepl",
+            }
+        )
+
+    output_payload = {
+        "schema_version": schema_version,
+        "status": "ok",
+        "language": target_lang,
+        "input": text,
+        "mode": "translation_only",
+        "translations": translations,
+    }
+
+    detected_source_language = None
+    if items and isinstance(items[0], dict):
+        detected_source_language = items[0].get("detected_source_language")
+
+    audit_request = {
+        "provider": "deepl",
+        "api_variant": "deepl.http",
+        "deepl_endpoint": api_url,
+        "headers": headers,
+        "request": request_body,
+        "response": data,
+        "detected_source_language": detected_source_language,
+        "style_ignored": style,
+    }
+    usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
+    return json.dumps(output_payload, ensure_ascii=False, indent=2), audit_request, "ok", usage, auth_key
+
+
+def render_deepl_simple_output(payload: Dict) -> str:
+    if not isinstance(payload, dict):
+        raise RuntimeError("DeepL simple output requires a JSON object payload.")
+
+    if payload.get("status") != "ok":
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    items = payload.get("translations")
+    if not isinstance(items, list):
+        raise RuntimeError("DeepL simple output requires translations as a list.")
+
+    lines: List[str] = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise RuntimeError(f"DeepL simple output translation at index {idx} must be an object.")
+        source = str(item.get("source", "")).strip()
+        natural = str(item.get("natural", "")).strip()
+        if source:
+            lines.append(source)
+        if natural:
+            lines.append(natural)
+        lines.append("")
+
+    return "\n".join(lines).rstrip("\n")
+
+
+def render_deepl_span_output(text: str, payload: Dict) -> str:
+    if not isinstance(payload, dict):
+        raise RuntimeError("DeepL span output requires a JSON object payload.")
+
+    if payload.get("status") != "ok":
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    items = payload.get("translations")
+    if not isinstance(items, list):
+        raise RuntimeError("DeepL span output requires translations as a list.")
+
+    grouped, flat_chunks = split_text_by_lines_and_sentences(text)
+    if len(items) != len(flat_chunks):
+        raise RuntimeError(
+            "DeepL span output sentence count mismatch between input split and translated items."
+        )
+
+    translated_by_index: List[str] = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise RuntimeError(f"DeepL span output translation at index {idx} must be an object.")
+        translated_by_index.append(str(item.get("natural", "")))
+
+    cursor = 0
+    rendered_lines: List[str] = []
+    for line_chunks in grouped:
+        if not line_chunks:
+            rendered_lines.append("")
+            continue
+
+        spans: List[str] = []
+        for chunk in line_chunks:
+            translation = translated_by_index[cursor]
+            cursor += 1
+            source_escaped = html.escape(chunk, quote=False)
+            meaning_escaped = html.escape(translation, quote=True)
+            spans.append(f'<span class="trans-hover" data-meaning="{meaning_escaped}">{source_escaped}</span>')
+        rendered_lines.append("".join(spans))
+
+    return "\n".join(rendered_lines)
+
+
+def render_translate(
+    text: str,
+    target_lang: str,
+    style: str,
+    model: Optional[str],
+    provider: Optional[str] = None,
+    translate_output: str = "json",
+) -> str:
+    config_raw = load_yaml(TRANSLATION_CONFIG_PATH)
+    config = validate_translation_config(config_raw, provider_override=provider)
+
+    active_provider = config["provider_active"]
     system_prompt = config["prompt"]["system"]
     schema_version = config["response"]["schema_version"]
     required_sections = config["response"]["required_sections"]
+
+    if active_provider == "deepl":
+        output, deepl_audit, status, usage, secret = render_translate_deepl(
+            text=text,
+            target_lang=target_lang,
+            style=style,
+            model=model,
+            config=config,
+            schema_version=schema_version,
+        )
+        audit_record = {
+            "timestamp_utc": now_iso8601_utc(),
+            "status": status,
+            "provider": "deepl",
+            "api_variant": deepl_audit.get("api_variant"),
+            "model": None,
+            "target_language": target_lang,
+            "style": style,
+            "request": deepl_audit,
+            "response": deepl_audit.get("response"),
+            "usage": usage,
+        }
+        write_translation_audit_record(config=config, api_key=secret, record=audit_record)
+        if translate_output == "simple":
+            deepl_payload = json.loads(output)
+            return render_deepl_simple_output(deepl_payload)
+        if translate_output == "span":
+            deepl_payload = json.loads(output)
+            return render_deepl_span_output(text, deepl_payload)
+        return output
+
+    if translate_output != "json":
+        raise RuntimeError("--translate-output simple/span is supported only with deepl provider.")
+
+    openai_cfg = config["providers"]["openai"]
+    api_key = openai_cfg["api_key"]
+    model_name = model or openai_cfg["model_default"]
 
     try:
         from openai import OpenAI
@@ -995,7 +1371,7 @@ def render_translate(text: str, target_lang: str, style: str, model: Optional[st
         return json.dumps(parsed_output, ensure_ascii=False, indent=2)
     except Exception as exc:
         raw_output_text = raw_output_text or str(exc)
-        raise
+        raise to_user_friendly_openai_error(exc) from exc
     finally:
         audit_record = {
             "timestamp_utc": now_iso8601_utc(),
@@ -1015,6 +1391,61 @@ def sanitize_text(text: str) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
 
 
+def decode_piped_stdin_bytes(raw: bytes, preferred_encoding: Optional[str] = None) -> str:
+    if not raw:
+        return ""
+
+    # Fast path for BOM-marked streams.
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig", errors="replace")
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+
+    # PowerShell/Windows sometimes forwards UTF-16LE text without BOM.
+    if raw.count(b"\x00") > max(1, len(raw) // 10):
+        for enc in ("utf-16-le", "utf-16-be", "utf-16"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                pass
+
+    encodings: List[str] = ["utf-8", "utf-8-sig"]
+    if preferred_encoding:
+        encodings.append(preferred_encoding)
+    stream_encoding = getattr(sys.stdin, "encoding", None)
+    if stream_encoding:
+        encodings.append(stream_encoding)
+    locale_encoding = locale.getpreferredencoding(False)
+    if locale_encoding:
+        encodings.append(locale_encoding)
+    encodings.extend(["utf-16-le", "utf-16-be", "cp65001", "cp932", "shift_jis", "cp1252"])
+
+    candidates = []
+    seen = set()
+    for enc in encodings:
+        enc_norm = str(enc).strip().lower()
+        if not enc_norm or enc_norm in seen:
+            continue
+        seen.add(enc_norm)
+        try:
+            decoded = raw.decode(enc_norm)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        candidates.append(decoded)
+
+    if not candidates:
+        return raw.decode("utf-8", errors="replace")
+
+    def score_text(text: str) -> int:
+        jp_chars = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff々ー]", text))
+        mojibake_markers = text.count("ã") + text.count("â") + text.count("�")
+        control_penalty = len([c for c in text if ord(c) < 32 and c not in "\n\r\t"])
+        nul_penalty = text.count("\x00")
+        return jp_chars * 3 - mojibake_markers * 4 - control_penalty * 3 - nul_penalty * 10
+
+    return max(candidates, key=score_text)
+
+
 def read_input_text(input_file: Optional[str]) -> str:
     if input_file:
         if not os.path.exists(input_file):
@@ -1025,19 +1456,149 @@ def read_input_text(input_file: Optional[str]) -> str:
     if sys.stdin.isatty():
         print("Paste Japanese text. Press Ctrl+Z then Enter to submit on Windows.", file=sys.stderr)
 
+    if not sys.stdin.isatty() and hasattr(sys.stdin, "buffer"):
+        raw = sys.stdin.buffer.read()
+        return sanitize_text(decode_piped_stdin_bytes(raw))
+
     return sanitize_text(sys.stdin.read())
 
 
-def write_output(content: str, output_file: Optional[str]) -> None:
+def set_windows_clipboard_text(content: str) -> None:
+    import ctypes  # pylint: disable=import-outside-toplevel
+
+    GMEM_MOVEABLE = 0x0002
+    CF_UNICODETEXT = 13
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = ctypes.c_int
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_int
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = ctypes.c_int
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = ctypes.c_int
+
+    text = content.replace("\r\n", "\n").replace("\n", "\r\n")
+    buffer = ctypes.create_unicode_buffer(text)
+    size_in_bytes = ctypes.sizeof(buffer)
+
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, size_in_bytes)
+    if not handle:
+        raise RuntimeError("GlobalAlloc failed for clipboard content.")
+
+    ptr = kernel32.GlobalLock(handle)
+    if not ptr:
+        kernel32.GlobalFree(handle)
+        raise RuntimeError("GlobalLock failed for clipboard content.")
+
+    try:
+        ctypes.memmove(ptr, ctypes.addressof(buffer), size_in_bytes)
+    finally:
+        kernel32.GlobalUnlock(handle)
+
+    if not user32.OpenClipboard(None):
+        kernel32.GlobalFree(handle)
+        raise RuntimeError("OpenClipboard failed.")
+
+    try:
+        if not user32.EmptyClipboard():
+            raise RuntimeError("EmptyClipboard failed.")
+        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+            raise RuntimeError("SetClipboardData failed.")
+        # Ownership is transferred to the system after successful SetClipboardData.
+        handle = None
+    finally:
+        user32.CloseClipboard()
+
+    if handle:
+        kernel32.GlobalFree(handle)
+
+
+def copy_to_clipboard(content: str) -> None:
+    if os.name == "nt":
+        try:
+            set_windows_clipboard_text(content)
+            return
+        except Exception:
+            pass
+
+    # Prefer tkinter next because it preserves Unicode consistently across platforms.
+    try:
+        import tkinter  # pylint: disable=import-outside-toplevel
+
+        root = tkinter.Tk()
+        root.withdraw()
+        root.clipboard_clear()
+        root.clipboard_append(content)
+        root.update()
+        root.destroy()
+        return
+    except Exception:
+        pass
+
+    if os.name == "nt":
+        commands = [
+            ["clip"],
+        ]
+    elif sys.platform == "darwin":
+        commands = [["pbcopy"]]
+    else:
+        commands = []
+        if shutil.which("wl-copy"):
+            commands.append(["wl-copy"])
+        if shutil.which("xclip"):
+            commands.append(["xclip", "-selection", "clipboard"])
+        if shutil.which("xsel"):
+            commands.append(["xsel", "--clipboard", "--input"])
+
+    last_error = None
+    for cmd in commands:
+        try:
+            if os.name == "nt" and cmd and cmd[0].lower() == "clip":
+                subprocess.run(cmd, input=content.encode("utf-16le", errors="replace"), check=True)
+            else:
+                subprocess.run(cmd, input=content, text=True, encoding="utf-8", errors="replace", check=True)
+            return
+        except Exception as exc:
+            last_error = exc
+
+    if last_error:
+        raise RuntimeError(f"Failed to copy output to clipboard: {last_error}") from last_error
+    raise RuntimeError("Failed to copy output to clipboard: no clipboard backend available.")
+
+
+def write_output(content: str, output_file: Optional[str], clipboard: bool = False) -> None:
     content = content.rstrip("\n")
+
+    if clipboard:
+        copy_to_clipboard(content)
+        return
 
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(content)
         return
 
-    sys.stdout.write(content)
-    sys.stdout.write("\n")
+    try:
+        sys.stdout.write(content)
+        sys.stdout.write("\n")
+    except UnicodeEncodeError:
+        if hasattr(sys.stdout, "buffer"):
+            sys.stdout.buffer.write((content + "\n").encode("utf-8", errors="replace"))
+            return
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1049,6 +1610,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", "-i", dest="input_file", help="Input file path. If omitted, reads stdin.")
     parser.add_argument("--output", "-o", dest="output_file", help="Output file path. If omitted, prints stdout.")
+    parser.add_argument(
+        "--clipboard",
+        action="store_true",
+        help="Copy output to clipboard instead of writing file/stdout.",
+    )
     parser.add_argument("--json", action="store_true", help="Use JSON output when available.")
     parser.add_argument(
         "--lookup-format",
@@ -1097,9 +1663,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--language", choices=["en", "vi"], default="en", help="Target language for translate mode.")
     parser.add_argument("--style", choices=["standard", "cure-dolly"], default="cure-dolly", help="Translation style.")
     parser.add_argument(
+        "--provider",
+        choices=["openai", "deepl"],
+        default=None,
+        help="Translation provider override (default uses translation.yml provider.active).",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help="OpenAI model name override for translate mode (defaults to translation.yml api.model_default).",
+    )
+    parser.add_argument(
+        "--translate-output",
+        choices=["json", "simple", "span"],
+        default="json",
+        help="Translate output style. 'simple' and 'span' are supported only for deepl provider.",
     )
     parser.add_argument(
         "--no-dedupe-ruby",
@@ -1181,6 +1759,7 @@ def build_interactive_args() -> SimpleNamespace:
             mode=mode,
             input_file=None,
             output_file=None,
+            clipboard=False,
             json=False,
             dict_source="local",
             dict_lang="both",
@@ -1192,7 +1771,9 @@ def build_interactive_args() -> SimpleNamespace:
             dict_dir=dict_dir,
             language="en",
             style="cure-dolly",
-            model="gpt-4.1-mini",
+            model=None,
+            provider=None,
+            translate_output="json",
             no_dedupe_ruby=False,
             interactive_text=None,
         )
@@ -1200,13 +1781,27 @@ def build_interactive_args() -> SimpleNamespace:
     input_method = prompt_choice("Input source:", ["Paste multiline text", "Read from file path"])
     input_file = None
     interactive_text = None
+    clipboard = False
     if input_method == 1:
         interactive_text = read_multiline_interactive()
-        output_prompt = "Output file path (leave blank for stdout): "
-        output_file = input(output_prompt).strip() or None
+        output_mode = prompt_choice("Output destination:", ["Stdout", "File", "Clipboard"])
+        if output_mode == 1:
+            output_file = None
+        elif output_mode == 2:
+            output_file = input("Output file path (leave blank for stdout): ").strip() or None
+        else:
+            output_file = None
+            clipboard = True
     else:
         input_file = input("Enter input file path (default: input.txt): ").strip() or "input.txt"
-        output_file = input("Output file path (default: output.txt): ").strip() or "output.txt"
+        output_mode = prompt_choice("Output destination:", ["File (default output.txt)", "Stdout", "Clipboard"])
+        if output_mode == 1:
+            output_file = input("Output file path (default: output.txt): ").strip() or "output.txt"
+        elif output_mode == 2:
+            output_file = None
+        else:
+            output_file = None
+            clipboard = True
 
     json_mode = False
     lookup_format = "text"
@@ -1247,17 +1842,30 @@ def build_interactive_args() -> SimpleNamespace:
 
     language = "en"
     style = "cure-dolly"
-    model = "gpt-4.1-mini"
+    model = None
+    provider = None
+    translate_output = "json"
     if mode == "translate":
+        provider_idx = prompt_choice("Translation provider:", ["Use translation.yml default", "OpenAI", "DeepL"])
+        provider = {1: None, 2: "openai", 3: "deepl"}[provider_idx]
         lang_idx = prompt_choice("Target language:", ["English", "Vietnamese"])
         language = {1: "en", 2: "vi"}[lang_idx]
-        style_idx = prompt_choice("Translation style:", ["Cure Dolly", "Standard"])
-        style = {1: "cure-dolly", 2: "standard"}[style_idx]
-        chosen_model = input("Model name override (leave blank to use translation.yml): ").strip()
-        if chosen_model:
-            model = chosen_model
+        if provider != "deepl":
+            style_idx = prompt_choice("Translation style:", ["Cure Dolly", "Standard"])
+            style = {1: "cure-dolly", 2: "standard"}[style_idx]
+            chosen_model = input("Model name override (leave blank to use translation.yml): ").strip()
+            if chosen_model:
+                model = chosen_model
+            translate_output = "json"
         else:
+            print("DeepL mode uses translation-only output. Style is ignored and --model is disabled.")
+            style = "standard"
             model = None
+            out_idx = prompt_choice(
+                "DeepL translation output:",
+                ["JSON", "Simple line-by-line", "Tooltip span markdown"],
+            )
+            translate_output = {1: "json", 2: "simple", 3: "span"}[out_idx]
 
     no_dedupe_ruby = False
     if mode == "furigana":
@@ -1268,6 +1876,7 @@ def build_interactive_args() -> SimpleNamespace:
         mode=mode,
         input_file=input_file,
         output_file=output_file,
+        clipboard=clipboard,
         json=json_mode,
         lookup_format=lookup_format,
         definition_wrap=definition_wrap,
@@ -1280,6 +1889,8 @@ def build_interactive_args() -> SimpleNamespace:
         language=language,
         style=style,
         model=model,
+        provider=provider,
+        translate_output=translate_output,
         no_dedupe_ruby=no_dedupe_ruby,
         interactive_text=interactive_text,
     )
@@ -1304,7 +1915,14 @@ def execute_mode(engine: TofuriEngine, args: SimpleNamespace, text: str) -> str:
             local_dict_vi_path=args.local_dict_vi,
             dict_lang=args.dict_lang,
         )
-    return render_translate(text=text, target_lang=args.language, style=args.style, model=args.model)
+    return render_translate(
+        text=text,
+        target_lang=args.language,
+        style=args.style,
+        model=args.model,
+        provider=getattr(args, "provider", None),
+        translate_output=getattr(args, "translate_output", "json"),
+    )
 
 
 def main() -> int:
@@ -1330,6 +1948,9 @@ def main() -> int:
                 args.local_dict_en = args.local_dict_en or args.local_dict
                 args.local_dict_vi = args.local_dict_vi
                 text = read_input_text(args.input_file)
+
+        if getattr(args, "clipboard", False) and args.output_file:
+            raise RuntimeError("--clipboard cannot be combined with --output.")
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -1344,7 +1965,7 @@ def main() -> int:
                 f"Path EN: {os.path.join(args.dict_dir, 'jmdict_en.tsv')}\n"
                 f"Path VI: {os.path.join(args.dict_dir, 'jmdict_vi.tsv')}"
             )
-            write_output(message, args.output_file)
+            write_output(message, args.output_file, clipboard=getattr(args, "clipboard", False))
             return 0
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1362,7 +1983,7 @@ def main() -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    write_output(output, args.output_file)
+    write_output(output, args.output_file, clipboard=getattr(args, "clipboard", False))
     return 0
 
 
