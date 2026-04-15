@@ -472,6 +472,78 @@ def lookup_local_multilang(
     return result
 
 
+def parse_lookup_list(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        parts = re.split(r"[,、;\s]+", value)
+        return [p.strip() for p in parts if p.strip()]
+    return []
+
+
+def load_lookup_config(path: Optional[str]) -> Dict[str, List[str]]:
+    if not path:
+        return {"exclude_tokens": [], "exclude_pos": []}
+    if not os.path.exists(path):
+        return {"exclude_tokens": [], "exclude_pos": []}
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("pyyaml package is required to load lookup config. Run: pip install pyyaml") from exc
+
+    with open(path, "r", encoding="utf-8") as f:
+        parsed = yaml.safe_load(f)
+
+    if parsed is None:
+        return {"exclude_tokens": [], "exclude_pos": []}
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Invalid lookup config structure in {path}: root must be a YAML mapping")
+
+    lookup_block = parsed.get("lookup") if isinstance(parsed.get("lookup"), dict) else parsed
+
+    exclude_tokens: List[str] = []
+    exclude_pos: List[str] = []
+
+    for key in ("exclude_tokens", "token_exclusions", "tokenizer"):
+        exclude_tokens.extend(parse_lookup_list(lookup_block.get(key)))
+    for key in ("exclude_pos", "pos_exclusions"):
+        exclude_pos.extend(parse_lookup_list(lookup_block.get(key)))
+
+    # Preserve order while removing duplicates.
+    exclude_tokens = list(dict.fromkeys(exclude_tokens))
+    exclude_pos = list(dict.fromkeys(exclude_pos))
+    return {"exclude_tokens": exclude_tokens, "exclude_pos": exclude_pos}
+
+
+def split_sino_vietnamese(definition_vi: Optional[str]) -> tuple[str, str]:
+    if not definition_vi:
+        return "", ""
+
+    text = str(definition_vi).strip()
+    if not text:
+        return "", ""
+
+    def is_upper_phrase(candidate: str) -> bool:
+        return any(ch.isalpha() for ch in candidate) and candidate == candidate.upper()
+
+    for sep in (" - ", ": "):
+        if sep not in text:
+            continue
+        left, right = text.split(sep, 1)
+        left = left.strip()
+        right = right.strip()
+        if is_upper_phrase(left):
+            return left, right
+
+    if is_upper_phrase(text):
+        return text, ""
+
+    return "", text
+
+
 def render_lookup(
     engine: TofuriEngine,
     text: str,
@@ -482,12 +554,28 @@ def render_lookup(
     local_dict_en_path: str = LOCAL_DICT_EN_DEFAULT_PATH,
     local_dict_vi_path: str = LOCAL_DICT_VI_DEFAULT_PATH,
     dict_lang: str = "both",
+    exclude_tokens: Optional[List[str]] = None,
+    exclude_pos: Optional[List[str]] = None,
+    lookup_config_path: Optional[str] = "lookup.yml",
 ) -> str:
     vi_skip_pos = {"助詞", "助動詞", "補助記号", "接頭辞", "接尾辞"}
 
-    tokens = [t for t in engine.tokenize(text) if t.surface.strip()]
+    lookup_cfg = load_lookup_config(lookup_config_path)
+    token_exclusions = set(lookup_cfg["exclude_tokens"])
+    pos_exclusions = set(lookup_cfg["exclude_pos"])
+    if exclude_tokens:
+        token_exclusions.update(t.strip() for t in exclude_tokens if str(t).strip())
+    if exclude_pos:
+        pos_exclusions.update(p.strip() for p in exclude_pos if str(p).strip())
+
+    tokens = [
+        t
+        for t in engine.tokenize(text)
+        if t.surface.strip() and t.surface not in token_exclusions and (not t.pos or t.pos not in pos_exclusions)
+    ]
     word_counter = Counter(t.surface for t in tokens if t.surface.strip())
-    unique_tokens = sorted(word_counter.keys(), key=lambda w: (-word_counter[w], w))
+    # Keep one row per token surface, preserving first appearance order in input text.
+    unique_tokens = list(dict.fromkeys(t.surface for t in tokens if t.surface.strip()))
 
     local_entries_en: List[Dict[str, str]] = []
     local_entries_vi: List[Dict[str, str]] = []
@@ -639,6 +727,27 @@ def render_lookup(
                 )
                 + " |"
             )
+        return "\n".join(lines)
+
+    if lookup_format == "compact":
+        lines: List[str] = []
+        for row in rows:
+            definition_text = row.get("definition_vi") or row.get("definition") or row.get("definition_en")
+            if not definition_text:
+                continue
+
+            word = str(row.get("word") or "").strip()
+            reading = str(row.get("reading") or "").strip()
+            head = f"{word}「{reading}」" if reading else word
+
+            sino, detail = split_sino_vietnamese(str(row.get("definition_vi") or ""))
+            if sino:
+                line = f"{head}{sino}"
+                if detail:
+                    line += f" - {detail}"
+            else:
+                line = f"{head} {str(definition_text).strip()}".strip()
+            lines.append(line)
         return "\n".join(lines)
 
     header = "word\tcount\treading\tpos\tdefinition\tsource"
@@ -1268,6 +1377,337 @@ def render_deepl_span_output(text: str, payload: Dict) -> str:
     return "\n".join(rendered_lines)
 
 
+def extract_natural_translation(
+    translation_data: Dict,
+    provider: str
+) -> str:
+    """Extract natural translation text from standardized response."""
+    if provider == "deepl":
+        # DeepL uses translations[] array
+        translations = translation_data.get("translations", [])
+        return " ".join(
+            item.get("natural", "")
+            for item in translations
+            if item.get("natural")
+        )
+    else:
+        # OpenAI uses sentences[] array
+        sentences = translation_data.get("sentences", [])
+        return " ".join(
+            sentence.get("natural", "")
+            for sentence in sentences
+            if sentence.get("natural")
+        )
+
+
+def extract_openai_full_dissection(sentences: List[Dict]) -> str:
+    """Extract full dissection from OpenAI response for preset mode."""
+    lines: List[str] = []
+    for sentence in sentences:
+        source = str(sentence.get("source", "")).strip()
+        segmented = str(sentence.get("segmented", "")).strip()
+        literal = str(sentence.get("literal", "")).strip()
+        natural = str(sentence.get("natural", "")).strip()
+        grammar_notes = sentence.get("grammar_notes", [])
+
+        if source:
+            lines.append(f"Source: {source}")
+        if segmented:
+            lines.append(f"Segmented: {segmented}")
+        if literal:
+            lines.append(f"Literal: {literal}")
+        if natural:
+            lines.append(f"Natural: {natural}")
+        if isinstance(grammar_notes, list) and grammar_notes:
+            lines.append("Grammar Notes:")
+            for note in grammar_notes:
+                if isinstance(note, dict):
+                    topic = note.get("topic", "")
+                    explanation = note.get("explanation", "")
+                    if topic or explanation:
+                        lines.append(f"- {topic}: {explanation}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip("\n")
+
+
+def extract_translation_for_preset(
+    translation_json: str,
+    provider: str,
+) -> str:
+    """Extract translation text for preset mode based on provider."""
+    try:
+        translation_data = json.loads(translation_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Translation response is not valid JSON: {exc}") from exc
+
+    status = translation_data.get("status")
+    if status == "rejected":
+        reason = translation_data.get("message", "Unknown rejection reason")
+        raise RuntimeError(f"Translation rejected: {reason}")
+
+    if provider == "openai":
+        sentences = translation_data.get("sentences", [])
+        return extract_openai_full_dissection(sentences)
+    else:
+        # DeepL: natural only
+        return extract_natural_translation(translation_data, provider)
+
+
+def format_vocab_line(
+    word: str,
+    reading: Optional[str],
+    definition_vi: Optional[str],
+    definition: Optional[str],
+    definition_en: Optional[str],
+) -> str:
+    """Format a single vocabulary line with ? (undefined) marker for missing definitions."""
+    reading_str = str(reading).strip() if reading else ""
+    head = f"{word}「{reading_str}」" if reading_str else word
+
+    # Prefer VI → combined → EN
+    if definition_vi:
+        sino, detail = split_sino_vietnamese(definition_vi)
+        if sino:
+            return f"{head}{sino} - {detail}"
+        return f"{head} {definition_vi}"
+    if definition:
+        return f"{head} {definition}"
+    if definition_en:
+        return f"{head} {definition_en}"
+    return f"{head}? (undefined)"
+
+
+def assemble_preset_callout(
+    furigana: str,
+    vocab: str,
+    translation: str,
+    furigana_error: Optional[str] = None,
+    vocab_error: Optional[str] = None,
+    translation_error: Optional[str] = None,
+) -> str:
+    """Assemble final markdown callout with all 3 sections."""
+    lines = [">[!note]+ Breakdown"]
+
+    # Furigana section
+    lines.append(">### **Furigana**")
+    if furigana_error:
+        lines.append(f">[!error] Furigana failed: {furigana_error}")
+    else:
+        for line in furigana.split("\n"):
+            lines.append(f">{line}" if line else ">")
+    lines.append(">")
+
+    # Vocabulary section
+    lines.append(">### **Vocabulary**")
+    if vocab_error:
+        lines.append(f">[!error] Vocabulary failed: {vocab_error}")
+    else:
+        for line in vocab.split("\n"):
+            lines.append(f">{line}" if line else ">")
+    lines.append(">")
+
+    # Translation section
+    lines.append(">### **Translation**")
+    if translation_error:
+        lines.append(f">[!error] Translation failed: {translation_error}")
+    else:
+        for line in translation.split("\n"):
+            lines.append(f">{line}" if line else ">")
+
+    return "\n".join(lines)
+
+
+def _get_active_provider_from_config() -> str:
+    """Get active provider from translation.yml without full validation."""
+    try:
+        config_raw = load_yaml(TRANSLATION_CONFIG_PATH)
+        provider_active = None
+        if isinstance(config_raw.get("provider"), dict):
+            provider_active = config_raw["provider"].get("active")
+        elif isinstance(config_raw.get("api"), dict):
+            provider_active = config_raw["api"].get("provider")
+        return provider_active or "openai"
+    except Exception:
+        return "openai"
+
+
+def _render_vocab_for_preset(
+    engine: TofuriEngine,
+    text: str,
+    dict_source: str = "auto",
+    dict_lang: str = "both",
+    local_dict_en_path: str = LOCAL_DICT_EN_DEFAULT_PATH,
+    local_dict_vi_path: str = LOCAL_DICT_VI_DEFAULT_PATH,
+    exclude_tokens: Optional[List[str]] = None,
+    exclude_pos: Optional[List[str]] = None,
+    lookup_config_path: Optional[str] = "lookup.yml",
+) -> str:
+    """Render vocabulary lines for preset mode, including undefined tokens."""
+    vi_skip_pos = {"助詞", "助動詞", "補助記号", "接頭辞", "接尾辞"}
+
+    lookup_cfg = load_lookup_config(lookup_config_path)
+    token_exclusions = set(lookup_cfg["exclude_tokens"])
+    pos_exclusions = set(lookup_cfg["exclude_pos"])
+    if exclude_tokens:
+        token_exclusions.update(t.strip() for t in exclude_tokens if str(t).strip())
+    if exclude_pos:
+        pos_exclusions.update(p.strip() for p in exclude_pos if str(p).strip())
+
+    tokens = [
+        t
+        for t in engine.tokenize(text)
+        if t.surface.strip() and t.surface not in token_exclusions and (not t.pos or t.pos not in pos_exclusions)
+    ]
+    # Keep one row per token surface, preserving first appearance order.
+    unique_tokens = list(dict.fromkeys(t.surface for t in tokens if t.surface.strip()))
+    token_index = {t.surface: t for t in tokens}
+
+    local_entries_en: List[Dict[str, str]] = []
+    local_entries_vi: List[Dict[str, str]] = []
+    if dict_source in ("auto", "local"):
+        if dict_lang in ("en", "both"):
+            local_entries_en = load_local_dictionary(local_dict_en_path, "en")
+        if dict_lang in ("vi", "both"):
+            local_entries_vi = load_local_dictionary(local_dict_vi_path, "vi")
+
+    lines: List[str] = []
+    for word in unique_tokens:
+        token = token_index[word]
+        reading = token.reading_hira
+        definition_vi = None
+        definition = None
+        definition_en = None
+
+        local_hit_any = False
+        if dict_source in ("auto", "local"):
+            vi_candidates = local_entries_vi
+            if token.pos in vi_skip_pos:
+                vi_candidates = []
+
+            local_hits = lookup_local_multilang(
+                word, reading, local_entries_en, vi_candidates, dict_lang,
+            )
+            en_hit = local_hits["en"]
+            vi_hit = local_hits["vi"]
+
+            if en_hit:
+                definition_en = en_hit.get("definition")
+                if en_hit.get("reading") and en_hit.get("reading") != "*":
+                    reading = en_hit.get("reading")
+                local_hit_any = True
+            if vi_hit:
+                definition_vi = vi_hit.get("definition")
+                if vi_hit.get("reading") and vi_hit.get("reading") != "*":
+                    reading = vi_hit.get("reading")
+                local_hit_any = True
+
+            if local_hit_any:
+                if dict_lang == "en":
+                    definition = definition_en
+                elif dict_lang == "vi":
+                    definition = definition_vi
+                else:
+                    joined = []
+                    if definition_en:
+                        joined.append(f"EN: {definition_en}")
+                    if definition_vi:
+                        joined.append(f"VI: {definition_vi}")
+                    definition = " | ".join(joined) if joined else None
+
+        if dict_source in ("auto", "jisho") and not local_hit_any:
+            jisho_hit = lookup_jisho(word)
+            if jisho_hit:
+                if jisho_hit.get("reading"):
+                    reading = jisho_hit.get("reading")
+                definition = jisho_hit.get("definition")
+                if dict_lang in ("en", "both"):
+                    definition_en = jisho_hit.get("definition")
+
+        lines.append(format_vocab_line(
+            word=word,
+            reading=reading,
+            definition_vi=definition_vi,
+            definition=definition,
+            definition_en=definition_en,
+        ))
+
+    return "\n".join(lines)
+
+
+def render_preset_combined(
+    engine: TofuriEngine,
+    text: str,
+    # Furigana options
+    dedupe_ruby: bool = True,
+    # Vocabulary options
+    dict_source: str = "auto",
+    dict_lang: str = "both",
+    local_dict_en_path: str = LOCAL_DICT_EN_DEFAULT_PATH,
+    local_dict_vi_path: str = LOCAL_DICT_VI_DEFAULT_PATH,
+    exclude_tokens: Optional[List[str]] = None,
+    exclude_pos: Optional[List[str]] = None,
+    lookup_config_path: Optional[str] = "lookup.yml",
+    # Translation options
+    translate_language: str = "en",
+    translate_style: str = "cure-dolly",
+    translate_model: Optional[str] = None,
+    translate_provider: Optional[str] = None,
+) -> str:
+    """Execute segmentation + furigana + vocabulary + translation in single pass."""
+    furigana_result = None
+    vocab_result = None
+    translation_result = None
+    furigana_err = None
+    vocab_err = None
+    translation_err = None
+
+    # Step 1: Furigana
+    try:
+        furigana_result = render_furigana(engine, text, dedupe_ruby=dedupe_ruby)
+    except Exception as exc:
+        furigana_err = str(exc)
+
+    # Step 2: Vocabulary (with undefined tokens included)
+    try:
+        vocab_result = _render_vocab_for_preset(
+            engine, text,
+            dict_source=dict_source,
+            dict_lang=dict_lang,
+            local_dict_en_path=local_dict_en_path,
+            local_dict_vi_path=local_dict_vi_path,
+            exclude_tokens=exclude_tokens,
+            exclude_pos=exclude_pos,
+            lookup_config_path=lookup_config_path,
+        )
+    except Exception as exc:
+        vocab_err = str(exc)
+
+    # Step 3: Translation
+    try:
+        provider = translate_provider or _get_active_provider_from_config()
+        translation_json = render_translate(
+            text=text,
+            target_lang=translate_language,
+            style=translate_style,
+            model=translate_model,
+            provider=provider,
+            translate_output="json",
+        )
+        translation_result = extract_translation_for_preset(translation_json, provider)
+    except Exception as exc:
+        translation_err = str(exc)
+
+    return assemble_preset_callout(
+        furigana=furigana_result or "",
+        vocab=vocab_result or "",
+        translation=translation_result or "",
+        furigana_error=furigana_err,
+        vocab_error=vocab_err,
+        translation_error=translation_err,
+    )
+
+
 def render_translate(
     text: str,
     target_lang: str,
@@ -1606,7 +2046,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=["segment", "furigana", "annotate", "lookup", "translate", "dict-download"],
+        choices=["segment", "furigana", "annotate", "lookup", "translate", "dict-download", "preset"],
     )
     parser.add_argument("--input", "-i", dest="input_file", help="Input file path. If omitted, reads stdin.")
     parser.add_argument("--output", "-o", dest="output_file", help="Output file path. If omitted, prints stdout.")
@@ -1618,9 +2058,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Use JSON output when available.")
     parser.add_argument(
         "--lookup-format",
-        choices=["text", "markdown"],
+        choices=["text", "markdown", "compact"],
         default="text",
         help="Output format for lookup mode when not using --json.",
+    )
+    parser.add_argument(
+        "--exclude-token",
+        action="append",
+        default=[],
+        help="Exclude token surface from lookup. Repeatable (e.g. --exclude-token を --exclude-token に).",
+    )
+    parser.add_argument(
+        "--exclude-pos",
+        action="append",
+        default=[],
+        help="Exclude tokenizer POS from lookup. Repeatable (e.g. --exclude-pos 助詞).",
+    )
+    parser.add_argument(
+        "--lookup-config",
+        default="lookup.yml",
+        help="Optional lookup config YAML path with exclusions (default: lookup.yml). Use empty value to disable.",
     )
     parser.add_argument(
         "--definition-wrap",
@@ -1741,6 +2198,7 @@ def build_interactive_args() -> SimpleNamespace:
             "Dictionary lookup",
             "Translation (AI)",
             "Download offline dictionaries",
+            "Preset (Furigana + Vocab + Translation)",
         ],
     )
     mode_map = {
@@ -1750,6 +2208,7 @@ def build_interactive_args() -> SimpleNamespace:
         4: "lookup",
         5: "translate",
         6: "dict-download",
+        7: "preset",
     }
     mode = mode_map[mode_index]
 
@@ -1765,6 +2224,9 @@ def build_interactive_args() -> SimpleNamespace:
             dict_lang="both",
             lookup_format="text",
             definition_wrap=0,
+            exclude_token=[],
+            exclude_pos=[],
+            lookup_config="lookup.yml",
             local_dict=LOCAL_DICT_EN_DEFAULT_PATH,
             local_dict_en=LOCAL_DICT_EN_DEFAULT_PATH,
             local_dict_vi=LOCAL_DICT_VI_DEFAULT_PATH,
@@ -1809,8 +2271,8 @@ def build_interactive_args() -> SimpleNamespace:
     if mode in ("segment", "annotate", "lookup"):
         json_mode = prompt_yes_no("Use JSON output? (default: no)", default_yes=False)
     if mode == "lookup" and not json_mode:
-        fmt_idx = prompt_choice("Lookup output format:", ["Text table", "Markdown table"])
-        lookup_format = {1: "text", 2: "markdown"}[fmt_idx]
+        fmt_idx = prompt_choice("Lookup output format:", ["Text table", "Markdown table", "Compact vocab list"])
+        lookup_format = {1: "text", 2: "markdown", 3: "compact"}[fmt_idx]
         if lookup_format == "markdown":
             wrap_raw = input("Definition wrap width for markdown (0 = no wrap, default: 120): ").strip()
             if wrap_raw:
@@ -1824,6 +2286,9 @@ def build_interactive_args() -> SimpleNamespace:
     local_dict = LOCAL_DICT_EN_DEFAULT_PATH
     local_dict_en = LOCAL_DICT_EN_DEFAULT_PATH
     local_dict_vi = LOCAL_DICT_VI_DEFAULT_PATH
+    exclude_token: List[str] = []
+    exclude_pos: List[str] = []
+    lookup_config = "lookup.yml"
     dict_dir = DICT_DIR_DEFAULT
     if mode == "lookup":
         dict_idx = prompt_choice("Dictionary source:", ["Auto", "Local", "Jisho (jisho.org)", "None"])
@@ -1839,12 +2304,58 @@ def build_interactive_args() -> SimpleNamespace:
                 local_dict_vi = input(
                     f"Vietnamese dictionary path (default: {LOCAL_DICT_VI_DEFAULT_PATH}): "
                 ).strip() or LOCAL_DICT_VI_DEFAULT_PATH
+        lookup_config = input("Lookup config path (default: lookup.yml, blank to disable): ").strip() or "lookup.yml"
+        token_raw = input("Exclude token surfaces (comma-separated, optional): ").strip()
+        pos_raw = input("Exclude POS tags (comma-separated, optional): ").strip()
+        exclude_token = parse_lookup_list(token_raw)
+        exclude_pos = parse_lookup_list(pos_raw)
 
     language = "en"
     style = "cure-dolly"
     model = None
     provider = None
     translate_output = "json"
+    no_dedupe_ruby = False
+
+    # Preset mode needs dictionary and translation settings.
+    if mode == "preset":
+        dict_idx = prompt_choice("Dictionary source:", ["Auto", "Local", "Jisho (jisho.org)", "None"])
+        dict_source = {1: "auto", 2: "local", 3: "jisho", 4: "none"}[dict_idx]
+        lang_idx = prompt_choice("Dictionary language:", ["Both", "English", "Vietnamese"])
+        dict_lang = {1: "both", 2: "en", 3: "vi"}[lang_idx]
+        if dict_source in ("auto", "local"):
+            if dict_lang in ("both", "en"):
+                local_dict_en = input(
+                    f"English dictionary path (default: {LOCAL_DICT_EN_DEFAULT_PATH}): "
+                ).strip() or LOCAL_DICT_EN_DEFAULT_PATH
+            if dict_lang in ("both", "vi"):
+                local_dict_vi = input(
+                    f"Vietnamese dictionary path (default: {LOCAL_DICT_VI_DEFAULT_PATH}): "
+                ).strip() or LOCAL_DICT_VI_DEFAULT_PATH
+        lookup_config = input("Lookup config path (default: lookup.yml, blank to disable): ").strip() or "lookup.yml"
+        token_raw = input("Exclude token surfaces (comma-separated, optional): ").strip()
+        pos_raw = input("Exclude POS tags (comma-separated, optional): ").strip()
+        exclude_token = parse_lookup_list(token_raw)
+        exclude_pos = parse_lookup_list(pos_raw)
+
+        provider_idx = prompt_choice("Translation provider:", ["Use translation.yml default", "OpenAI", "DeepL"])
+        provider = {1: None, 2: "openai", 3: "deepl"}[provider_idx]
+        lang_idx = prompt_choice("Target language:", ["English", "Vietnamese"])
+        language = {1: "en", 2: "vi"}[lang_idx]
+        if provider != "deepl":
+            style_idx = prompt_choice("Translation style:", ["Cure Dolly", "Standard"])
+            style = {1: "cure-dolly", 2: "standard"}[style_idx]
+            chosen_model = input("Model name override (leave blank to use translation.yml): ").strip()
+            if chosen_model:
+                model = chosen_model
+        else:
+            print("DeepL mode uses translation-only output. Style is ignored and --model is disabled.")
+            style = "standard"
+            model = None
+
+        preserve = prompt_yes_no("Preserve existing <ruby> tags?", default_yes=True)
+        no_dedupe_ruby = not preserve
+
     if mode == "translate":
         provider_idx = prompt_choice("Translation provider:", ["Use translation.yml default", "OpenAI", "DeepL"])
         provider = {1: None, 2: "openai", 3: "deepl"}[provider_idx]
@@ -1867,7 +2378,6 @@ def build_interactive_args() -> SimpleNamespace:
             )
             translate_output = {1: "json", 2: "simple", 3: "span"}[out_idx]
 
-    no_dedupe_ruby = False
     if mode == "furigana":
         preserve = prompt_yes_no("Preserve existing <ruby> tags?", default_yes=True)
         no_dedupe_ruby = not preserve
@@ -1880,6 +2390,9 @@ def build_interactive_args() -> SimpleNamespace:
         json=json_mode,
         lookup_format=lookup_format,
         definition_wrap=definition_wrap,
+        exclude_token=exclude_token,
+        exclude_pos=exclude_pos,
+        lookup_config=lookup_config,
         dict_source=dict_source,
         dict_lang=dict_lang,
         local_dict=local_dict,
@@ -1914,15 +2427,38 @@ def execute_mode(engine: TofuriEngine, args: SimpleNamespace, text: str) -> str:
             local_dict_en_path=args.local_dict_en,
             local_dict_vi_path=args.local_dict_vi,
             dict_lang=args.dict_lang,
+            exclude_tokens=getattr(args, "exclude_token", []),
+            exclude_pos=getattr(args, "exclude_pos", []),
+            lookup_config_path=getattr(args, "lookup_config", "lookup.yml"),
         )
-    return render_translate(
-        text=text,
-        target_lang=args.language,
-        style=args.style,
-        model=args.model,
-        provider=getattr(args, "provider", None),
-        translate_output=getattr(args, "translate_output", "json"),
-    )
+    if args.mode == "translate":
+        return render_translate(
+            text=text,
+            target_lang=args.language,
+            style=args.style,
+            model=args.model,
+            provider=getattr(args, "provider", None),
+            translate_output=getattr(args, "translate_output", "json"),
+        )
+    if args.mode == "preset":
+        return render_preset_combined(
+            engine=engine,
+            text=text,
+            dedupe_ruby=not args.no_dedupe_ruby,
+            dict_source=args.dict_source,
+            dict_lang=args.dict_lang,
+            local_dict_en_path=args.local_dict_en,
+            local_dict_vi_path=args.local_dict_vi,
+            exclude_tokens=getattr(args, "exclude_token", []),
+            exclude_pos=getattr(args, "exclude_pos", []),
+            lookup_config_path=getattr(args, "lookup_config", "lookup.yml"),
+            translate_language=args.language,
+            translate_style=args.style,
+            translate_model=args.model,
+            translate_provider=getattr(args, "provider", None),
+        )
+    # dict-download is handled in main()
+    raise RuntimeError(f"Unknown mode: {args.mode}")
 
 
 def main() -> int:

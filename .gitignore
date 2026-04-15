@@ -58,3 +58,6 @@ Thumbs.db
 
 memory/
 translation.yml
+lookup.yml
+
+.qwen/*

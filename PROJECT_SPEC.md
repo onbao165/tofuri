@@ -68,6 +68,7 @@ Current important files/folders:
   - lookup
   - translate
   - dict-download
+  - preset
 
 If mode is omitted, interactive menu mode starts.
 
@@ -85,7 +86,10 @@ If mode is omitted, interactive menu mode starts.
 - --local-dict: backward-compatible alias for English local dictionary
 - --local-dict-en: English TSV path (default dictionaries/jmdict_en.tsv)
 - --local-dict-vi: Vietnamese TSV path (default dictionaries/jmdict_vi.tsv)
-- --lookup-format: text | markdown (default text)
+- --lookup-format: text | markdown | compact (default text)
+- --exclude-token: token-surface exclusion list entry, repeatable
+- --exclude-pos: tokenizer POS exclusion entry, repeatable
+- --lookup-config: optional YAML config path for lookup exclusions (default lookup.yml, empty disables)
 - --definition-wrap: integer width for markdown definition wrapping, 0 disables
 
 ### translate
@@ -97,6 +101,11 @@ If mode is omitted, interactive menu mode starts.
 
 ### furigana
 - --no-dedupe-ruby: disable preservation of existing ruby blocks
+
+### preset
+- Inherits all lookup options: --dict-source, --dict-lang, --local-dict-en, --local-dict-vi, --exclude-token, --exclude-pos, --lookup-config
+- Inherits all translate options: --language, --style, --provider, --model
+- Inherits furigana options: --no-dedupe-ruby
 
 ### dict-download
 - --dict-dir: output dictionary directory (default dictionaries)
@@ -161,7 +170,21 @@ Vietnamese filtering behavior:
 Output formats:
 - text (tab-separated columns)
 - markdown table
+- compact vocab list
 - JSON via --json
+
+Exclusion behavior:
+- Effective exclusion set is merged from `lookup.yml` and CLI flags.
+- Surface exclusions filter tokens by exact token surface.
+- POS exclusions filter tokens by tokenizer POS.
+
+Compact format behavior:
+- Emits one vocab line per row with available definition.
+- Preferred definition source order: `definition_vi`, then `definition`, then `definition_en`.
+- Line shape:
+  - `word「reading」SINO_VI - definition` when uppercase Sino-Vietnamese prefix is available.
+  - `word「reading」 definition` when Sino-Vietnamese prefix is unavailable.
+- Rows without any definition are omitted.
 
 Markdown wrapping behavior:
 - Enabled when --definition-wrap > 0
@@ -259,6 +282,68 @@ Outputs:
 Post-processing:
 - Temporary archives are removed after TSV generation.
 - Returns and prints entry counts for EN and VI.
+
+## 6.7 preset
+Executes segmentation + furigana + vocabulary lookup + translation in a single pass and outputs a unified Obsidian-style markdown callout.
+
+### Processing Pipeline
+1. **Furigana**: Tokenize input and render HTML ruby tags for kanji-bearing tokens
+2. **Vocabulary**: Extract all unique tokens (preserving first-appearance order) with dictionary definitions
+3. **Translation**: Generate AI/DeepL translation of input text
+
+### Output Format
+Output is a single markdown callout block:
+```markdown
+>[!note]+ Breakdown
+>### **Furigana**
+><ruby>百<rt>ひゃく</rt></ruby> <ruby>五十<rt>ごじゅう</rt></ruby> ...
+>
+>### **Vocabulary**
+>賞「しょう」 giải thưởng
+>コンビニ「こんびに」? (undefined)
+>
+>### **Translation**
+>Natural translation text here...
+```
+
+### Furigana Section
+- Contains annotated text with `<ruby>` tags for kanji-bearing tokens
+- Preserves original line breaks from input
+- Non-kanji tokens pass through unchanged
+- Existing ruby blocks preserved by default (disabled with --no-dedupe-ruby)
+
+### Vocabulary Section
+- Shows ALL unique tokens from segmentation (not just those with definitions)
+- Tokens in **first-appearance order** (not frequency order)
+- Preferred definition source order: `definition_vi` → `definition` → `definition_en`
+- Line format:
+  - `word「reading」 definition` when definition available
+  - `word「reading」SINO_VI - detail` when Sino-Vietnamese uppercase prefix detected
+  - `word「reading」? (undefined)` when no dictionary match found
+- Exclusion behavior from `lookup.yml` preserved (--exclude-token, --exclude-pos)
+- POS column NOT included in output
+
+### Translation Section
+- **DeepL provider**: Extract only `natural` translation text
+- **OpenAI provider**: Show FULL dissection including:
+  - Source sentence
+  - Segmented Japanese
+  - Literal scaffold translation
+  - Natural translation
+  - Grammar notes (list of topic/explanation pairs)
+
+### Error Handling
+- If any operation fails, partial output is still rendered
+- Failed sections show error placeholder: `>[!error] <Section> failed: <reason>`
+- Exit code 0 for non-critical failures (translation/vocabulary)
+- Exit code 1 for critical failures (furigana/segmentation)
+
+### Configuration
+- Inherits all lookup mode options for dictionary behavior
+- Inherits all translate mode options for translation behavior
+- Inherits furigana mode options for ruby tag handling
+- Callout title is fixed as "Breakdown" (no customization flags)
+- Section headers are fixed: `### **Furigana**`, `### **Vocabulary**`, `### **Translation**`
 
 ## 7. Dictionary Data Specification
 ## 7.1 TSV format
@@ -376,6 +461,7 @@ Known tests:
 - tests/test_furigana_regression.py exists and should remain green for furigana changes
 - tests/test_translation_contract.py validates DeepL language mapping, simple output rendering, and stdin decode behavior
 - tests/test_openai_compat.py validates legacy and object-style usage token extraction
+- tests/test_preset_combined.py validates preset mode: vocab formatting, callout assembly, translation extraction, error handling
 
 Current gaps to consider for future test expansion:
 - lookup markdown wrapping edge cases
@@ -405,4 +491,10 @@ Suggested update checklist:
 - README consistency verified
 
 ## 17. Versioning Note
-This specification reflects repository state as of 2026-04-09 and should be treated as the canonical project contract until superseded by a later revision.
+This specification reflects repository state as of 2026-04-13 and should be treated as the canonical project contract until superseded by a later revision.
+
+Changes since 2026-04-09:
+- Added preset mode (section 6.7) for combined furigana + vocabulary + translation output
+- Updated CLI mode list (section 5.1) to include preset
+- Updated interactive mode (section 10) to include preset as option 7
+- Added test coverage (section 15) for preset combined mode

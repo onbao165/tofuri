@@ -78,6 +78,57 @@ class FuriganaRegressionTests(unittest.TestCase):
             if os.path.exists(temp_path_vi):
                 os.remove(temp_path_vi)
 
+    def test_lookup_excludes_tokens(self) -> None:
+        output = render_lookup(
+            self.engine,
+            "猫が魚を食べる。",
+            source="none",
+            json_mode=False,
+            lookup_format="text",
+            exclude_tokens=["を", "が"],
+            lookup_config_path="",
+        )
+        self.assertNotIn("\nを\t", output)
+        self.assertNotIn("\nが\t", output)
+
+    def test_lookup_compact_format_with_sino_vietnamese(self) -> None:
+        fd_vi, temp_path_vi = tempfile.mkstemp(suffix=".tsv")
+        os.close(fd_vi)
+        try:
+            with open(temp_path_vi, "w", encoding="utf-8") as f:
+                f.write("意識\tいしき\tÝ THỨC - nhận thức\n")
+                f.write("浮かぶ\tうかぶ\tnổi lên\n")
+
+            output = render_lookup(
+                self.engine,
+                "意識が浮かぶ。",
+                source="local",
+                json_mode=False,
+                lookup_format="compact",
+                local_dict_en_path=temp_path_vi,
+                local_dict_vi_path=temp_path_vi,
+                dict_lang="vi",
+                lookup_config_path="",
+            )
+            self.assertIn("意識「いしき」Ý THỨC - nhận thức", output)
+            self.assertIn("浮かぶ「うかぶ」 nổi lên", output)
+        finally:
+            if os.path.exists(temp_path_vi):
+                os.remove(temp_path_vi)
+
+    def test_lookup_preserves_first_appearance_order(self) -> None:
+        output = render_lookup(
+            self.engine,
+            "犬 猫 犬 鳥",
+            source="none",
+            json_mode=False,
+            lookup_format="text",
+            lookup_config_path="",
+        )
+        lines = output.splitlines()[1:]  # skip header
+        words = [line.split("\t", 1)[0] for line in lines]
+        self.assertEqual(words[:3], ["犬", "猫", "鳥"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,41 @@
+# Example lookup configuration for Tofuri
+#
+# Use this file as a template and copy values into lookup.yml.
+# The lookup mode will read lookup.yml by default unless you pass --lookup-config.
+#
+# Supported keys:
+# - lookup.exclude_tokens: exact token surfaces to skip
+# - lookup.exclude_pos: tokenizer POS tags to skip
+
+lookup:
+  # Skip common particles and punctuation.
+  exclude_tokens:
+    - を
+    - に
+    - で
+    - が
+    - は
+    - も
+    - へ
+    - と
+    - から
+    - まで
+    - の
+    - 、
+    - 。
+    - 私
+    - 僕
+    - 俺
+    - これ
+    - それ
+    - あれ
+
+  # Skip tokenizer POS categories.
+  exclude_pos:
+    - 助詞
+    - 補助記号
+
+# Notes:
+# - Exclusions are matched exactly for token surfaces.
+# - POS exclusions are useful for filtering grammatical particles globally.
+# - You can still add CLI overrides with --exclude-token and --exclude-pos.

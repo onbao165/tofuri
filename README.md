@@ -26,6 +26,9 @@ Get-Content input.txt | python tofuri.py annotate
 # Dictionary lookup for all tokens
 Get-Content input.txt | python tofuri.py lookup --dict-source auto
 
+# Compact vocabulary output with exclusions and clipboard copy
+Get-Content -Raw input.txt | python tofuri.py lookup --dict-source local --dict-lang vi --lookup-format compact --exclude-token を --exclude-token に --exclude-pos 助詞 --clipboard
+
 # Download well-known offline dictionaries (JMdict)
 python tofuri.py dict-download --dict-dir dictionaries
 
@@ -44,6 +47,12 @@ Get-Content input.txt | python tofuri.py translate --provider deepl --language e
 
 # Copy output directly to clipboard
 Get-Content input.txt | python tofuri.py translate --provider deepl --language en --translate-output simple --clipboard
+
+# Preset: Furigana + Vocabulary + Translation in single markdown callout
+Get-Content -Raw input.txt | python tofuri.py preset --clipboard
+
+# Preset with specific dictionary and translation settings
+Get-Content -Raw input.txt | python tofuri.py preset --dict-source local --dict-lang vi --provider deepl --language en
 ```
 
 Translation Configuration
@@ -60,6 +69,7 @@ Modes
 - `annotate`: segmentation + ruby in one pass.
 - `lookup`: dictionary lookup table (or JSON with `--json`).
 - `translate`: AI translation with grammar-oriented explanation style.
+- `preset`: combined furigana + vocabulary + translation in single markdown callout.
 
 Common Options
 - `--input, -i`: read from file path instead of stdin.
@@ -77,6 +87,8 @@ Interactive Menu Flow
 	- `3` Segmentation + Furigana
 	- `4` Dictionary lookup
 	- `5` Translation (AI)
+	- `6` Download offline dictionaries
+	- `7` Preset (Furigana + Vocab + Translation)
 - Choose input source:
 	- `1` Paste multiline text and finish with `__END__`
 	- `2` Input file path (blank uses `input.txt`)
@@ -89,8 +101,27 @@ Lookup Options
 - `--local-dict-en <path>` English local TSV dictionary path (default: `dictionaries/jmdict_en.tsv`)
 - `--local-dict-vi <path>` Vietnamese local TSV dictionary path (default: `dictionaries/jmdict_vi.tsv`)
 - `--local-dict <path>` backward-compatible alias for English local dictionary path
-- `--lookup-format text|markdown` output format for lookup mode when not using JSON
+- `--lookup-format text|markdown|compact` output format for lookup mode when not using JSON
+- `--exclude-token <token>` exclude token surface from lookup (repeatable)
+- `--exclude-pos <pos>` exclude tokenizer POS from lookup (repeatable)
+- `--lookup-config <path>` optional lookup YAML config path (default: `lookup.yml`, empty disables)
 - `--definition-wrap <int>` wrap width for markdown definition cells using `<br>` (0 disables wrapping)
+
+Compact Lookup Format
+- Output line shape:
+	- `word「reading」SINO_VI - definition`
+	- If Sino-Vietnamese uppercase prefix is missing, output falls back to `word「reading」 definition`.
+- Example:
+	- `意識「いしき」Ý THỨC`
+	- `思考「しこう」TƯ KHẢO - tư duy, suy tư, suy nghĩ`
+	- `浮かぶ「うかぶ」 nổi lên, lơ lửng, nảy ra`
+
+lookup.yml Example
+```yaml
+lookup:
+	exclude_tokens: ["を", "に", "で", "、"]
+	exclude_pos: ["助詞"]
+```
 
 Markdown Lookup Example
 ```bash
@@ -145,4 +176,39 @@ providers:
 Example With File Input
 ```bash
 python tofuri.py lookup --input input.txt --json --output lookup.json
+```
+
+Preset Mode
+- Run: `Get-Content -Raw input.txt | python tofuri.py preset`
+- Output format: Obsidian-style markdown callout with 3 sections:
+  - **Furigana**: Input text with HTML ruby tags for kanji readings
+  - **Vocabulary**: All unique tokens with dictionary definitions (or `? (undefined)` marker)
+  - **Translation**: AI-powered translation (DeepL: natural only; OpenAI: full dissection)
+- Options:
+  - Inherits all lookup options: `--dict-source`, `--dict-lang`, `--local-dict-en`, `--local-dict-vi`, `--exclude-token`, `--exclude-pos`, `--lookup-config`
+  - Inherits all translate options: `--language`, `--style`, `--provider`, `--model`
+  - Furigana options: `--no-dedupe-ruby`
+- Vocabulary format:
+  - With definition: `word「reading」 definition` or `word「reading」SINO_VI - detail`
+  - Without definition: `word「reading」? (undefined)`
+- Translation behavior:
+  - DeepL provider: Natural translation only
+  - OpenAI provider: Full dissection (Source, Segmented, Literal, Natural, Grammar Notes)
+- Error handling:
+  - Failed sections show error placeholder while successful sections still render
+  - Partial output is written with exit code 0 (non-critical failure)
+
+Preset Output Example
+```markdown
+>[!note]+ Breakdown
+>### **Furigana**
+><ruby>百<rt>ひゃく</rt></ruby> <ruby>五十<rt>ごじゅう</rt></ruby>
+>
+>### **Vocabulary**
+>百「ひゃく」 number
+>五十「ごじゅう」 fifty
+>未知「? (undefined)」
+>
+>### **Translation**
+>One hundred fifty
 ```
