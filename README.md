@@ -200,7 +200,7 @@ Preset Mode
 
 Preset Output Example
 ```markdown
->[!note]+ Breakdown
+>[!note]- Breakdown
 >### **Furigana**
 ><ruby>百<rt>ひゃく</rt></ruby> <ruby>五十<rt>ごじゅう</rt></ruby>
 >

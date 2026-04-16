@@ -44,7 +44,7 @@ The preset mode must execute the following operations in sequence:
 Output must use Obsidian-compatible markdown callout syntax:
 
 ```markdown
->[!note]+ Show Breakdown
+>[!note]- Breakdown
 >### **Furigana**
 ><ruby>百<rt>ひゃく</rt></ruby> <ruby>五十<rt>ごじゅう</rt></ruby> ...
 >
@@ -241,7 +241,7 @@ def assemble_callout(
     sections: List[str],
     callout_title: str,
 ) -> str:
-    lines = [f">[!note]+ {callout_title}"]
+    lines = [f">[!note]- {callout_title}"]
     
     if "furigana" in sections:
         lines.append(">### **Furigana**")
@@ -449,7 +449,7 @@ When `--preset-format json` is specified, output should be:
 ### 6.2 Output (Markdown Callout)
 
 ```markdown
->[!note]+ Show Breakdown
+>[!note]- Show Breakdown
 >### **Furigana**
 ><ruby>百<rt>ひゃく</rt></ruby> <ruby>五十<rt>ごじゅう</rt></ruby> <ruby>五<rt>ご</rt></ruby> <ruby>回<rt>かい</rt></ruby> <ruby>芥川<rt>あくたがわ</rt></ruby> <ruby>賞<rt>しょう</rt></ruby> <ruby>受賞<rt>じゅしょう</rt></ruby> <ruby>作<rt>さく</rt></ruby>
 >

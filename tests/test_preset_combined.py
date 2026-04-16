@@ -69,7 +69,7 @@ class TestAssemblePresetCallout(unittest.TestCase):
             vocab="百「ひゃく」 number",
             translation="One hundred",
         )
-        self.assertIn(">[!note]+ Breakdown", result)
+        self.assertIn(">[!note]- Breakdown", result)
         self.assertIn(">### **Furigana**", result)
         self.assertIn(">### **Vocabulary**", result)
         self.assertIn(">### **Translation**", result)

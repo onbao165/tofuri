@@ -294,7 +294,7 @@ Executes segmentation + furigana + vocabulary lookup + translation in a single p
 ### Output Format
 Output is a single markdown callout block:
 ```markdown
->[!note]+ Breakdown
+>[!note]- Breakdown
 >### **Furigana**
 ><ruby>百<rt>ひゃく</rt></ruby> <ruby>五十<rt>ごじゅう</rt></ruby> ...
 >

@@ -1487,7 +1487,7 @@ def assemble_preset_callout(
     translation_error: Optional[str] = None,
 ) -> str:
     """Assemble final markdown callout with all 3 sections."""
-    lines = [">[!note]+ Breakdown"]
+    lines = [">[!note]- Breakdown"]
 
     # Furigana section
     lines.append(">### **Furigana**")
